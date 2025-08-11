@@ -156,7 +156,7 @@ export default function NuevoProspecto() {
             <input className="input"
                    value={lugarProspeccion}
                    onChange={(e) => setLugarProspeccion(e.target.value)}
-                   placeholder="Ej: Evento, Calle, Centro comercial" />
+                   placeholder="Ej: Jockey Plaza, Mercado Unicachi, Centro de Lima, etc." />
           </div>
 
           <div>
@@ -185,14 +185,14 @@ export default function NuevoProspecto() {
             <input className="input"
                    value={dniCe}
                    onChange={(e) => { const v = e.target.value.toUpperCase(); setDniCe(v); debouncedPrecheck(celular, v); }}
-                   placeholder="DNI: 8 dígitos / CE: 9-12 alfanum." />
+                   placeholder="DNI: 8 dígitos / CE: 9-12 dígitos" />
           </div>
 
           <div>
             <label className="label">Correo</label>
             <input type="email" className="input"
                    value={email} onChange={(e) => setEmail(e.target.value)}
-                   placeholder="nombre@dominio.com" />
+                   placeholder="nombre_del_correo@dominio.com" />
           </div>
 
           <div>
@@ -207,7 +207,7 @@ export default function NuevoProspecto() {
             <label className="label">Comentario</label>
             <textarea className="textarea" rows={3}
                       value={comentario} onChange={(e) => setComentario(e.target.value)}
-                      placeholder="Notas, preferencias, etc." />
+                      placeholder="Horarios de llamada, preferencia de comunicación, etc." />
           </div>
 
           {dup && <p className="alert">Ya existe un prospecto con este {dup === 'celular' ? 'celular' : 'DNI'}.</p>}

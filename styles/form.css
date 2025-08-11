@@ -28,7 +28,7 @@ html,body{
   box-shadow:0 8px 24px rgba(0,0,0,.06);
 }
 
-.label{ display:block; font-size:14px; margin-bottom:6px; }
+.label{ display:block; font-size:14px; margin-bottom:6px; font-weight:700; }
 .required{ color:#b91c1c; }
 
 .input,.select,.textarea{
@@ -57,6 +57,9 @@ html,body{
   font-size:16px; font-weight:700;
   cursor:pointer;
   transition:transform .05s, background .2s;
+  width: 100%;
+  display: block;
+  box-sizing: border-box; /* opcional, asegura mismo cálculo que los inputs */
 }
 .button:hover{ background:var(--brand-2); }
 .button:active{ transform:translateY(1px); }
