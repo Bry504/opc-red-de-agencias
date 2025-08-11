@@ -40,10 +40,10 @@ async function pushToHighLevel({
   const upsertRes = await fetch('https://services.leadconnectorhq.com/contacts/upsert', {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${GHL_TOKEN}`,
+      Authorization: `Bearer ${GHL_TOKEN}`,
       'Content-Type': 'application/json',
-      'Accept': 'application/json',
-      'Version': '2021-07-28',
+      Accept: 'application/json',
+      Version: '2021-07-28',
       'Location-Id': GHL_LOCATION_ID,
     },
     body: JSON.stringify({
@@ -68,16 +68,20 @@ async function pushToHighLevel({
   // Fallback: si no vino id, buscar por teléfono
   if (!contactId && phoneE164) {
     try {
-      const searchRes = await fetch(`https://services.leadconnectorhq.com/contacts/search?locationId=${encodeURIComponent(GHL_LOCATION_ID)}&query=${encodeURIComponent(phoneE164)}`, {
-        headers: {
-          'Authorization': `Bearer ${GHL_TOKEN}`,
-          'Accept': 'application/json',
-          'Version': '2021-07-28',
-          'Location-Id': GHL_LOCATION_ID,
-        },
-      });
+      const searchRes = await fetch(
+        `https://services.leadconnectorhq.com/contacts/search?locationId=${encodeURIComponent(GHL_LOCATION_ID)}&query=${encodeURIComponent(phoneE164)}`,
+        {
+          headers: {
+            Authorization: `Bearer ${GHL_TOKEN}`,
+            Accept: 'application/json',
+            Version: '2021-07-28',
+            'Location-Id': GHL_LOCATION_ID,
+          },
+        }
+      );
       const sjson: any = await searchRes.json().catch(() => ({}));
       contactId = sjson?.contacts?.[0]?.id;
+      if (contactId) console.info('GHL search contactId', contactId);
     } catch (e) {
       console.warn('GHL search by phone failed', e);
     }
@@ -87,6 +91,7 @@ async function pushToHighLevel({
     console.warn('GHL: no contactId after upsert/search', upsertJson);
     return { ok: false };
   }
+  console.info('GHL upsert OK', contactId);
 
   // 2) Tags (no bloqueante)
   try {
@@ -95,16 +100,18 @@ async function pushToHighLevel({
     const tagRes = await fetch(`https://services.leadconnectorhq.com/contacts/${contactId}/tags`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${GHL_TOKEN}`,
+        Authorization: `Bearer ${GHL_TOKEN}`,
         'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'Version': '2021-07-28',
+        Accept: 'application/json',
+        Version: '2021-07-28',
       },
       body: JSON.stringify({ tags }),
     });
     if (!tagRes.ok) {
       const tj = await tagRes.text().catch(() => '');
       console.warn('GHL add-tags failed', tagRes.status, tj);
+    } else {
+      console.info('GHL tags OK', tags);
     }
   } catch (e) {
     console.warn('GHL add-tags error', e);
@@ -118,24 +125,27 @@ async function pushToHighLevel({
     return { ok: true, contactId };
   }
 
-  const oppRes = await fetch('https://services.leadconnectorhq.com/opportunities', { // <- sin barra final
+  const oppPayload = {
+    locationId: GHL_LOCATION_ID,
+    contactId,
+    pipelineId,
+    pipelineStageId, // campo correcto
+    status: 'open',
+    source: 'OPC',
+    name: `${nombre} ${apellido} - OPC:${opcCodigo}${proyecto ? ` - ${proyecto}` : ''}`,
+  };
+  console.info('GHL opp payload', oppPayload);
+
+  const oppRes = await fetch('https://services.leadconnectorhq.com/opportunities', {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${GHL_TOKEN}`,
+      Authorization: `Bearer ${GHL_TOKEN}`,
       'Content-Type': 'application/json',
-      'Accept': 'application/json',
-      'Version': '2021-07-28',
+      Accept: 'application/json',
+      Version: '2021-07-28',
       'Location-Id': GHL_LOCATION_ID,
     },
-    body: JSON.stringify({
-      locationId: GHL_LOCATION_ID,
-      contactId,
-      pipelineId,
-      pipelineStageId, // <- clave
-      status: 'open',
-      source: 'OPC',
-      name: `${nombre} ${apellido} - OPC:${opcCodigo}${proyecto ? ` - ${proyecto}` : ''}`,
-    }),
+    body: JSON.stringify(oppPayload),
   });
 
   if (!oppRes.ok) {
@@ -145,7 +155,9 @@ async function pushToHighLevel({
   }
 
   const oppJson: any = await oppRes.json().catch(() => ({}));
-  return { ok: true, contactId, opportunityId: oppJson?.id };
+  const opportunityId = oppJson?.id;
+  console.info('GHL opportunity OK', opportunityId);
+  return { ok: true, contactId, opportunityId };
 }
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
