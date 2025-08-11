@@ -3,6 +3,7 @@ import { useEffect, useState, useMemo } from 'react';
 import { useRouter } from 'next/router';
 
 const PROYECTOS = [
+  'NINGUNO',
   'BOSQUES DE CALANGO',
   'ASIA PACIFIC CONDOMINIO',
   'TOSCANA GARDEN',
@@ -112,7 +113,7 @@ export default function NuevoProspecto() {
           celular,
           dni_ce: dniCe,
           email,
-          proyecto_interes: proyecto,
+          proyecto_interes: proyecto === 'NINGUNO' ? null : proyecto,
           comentario,
           asesor_codigo: asesorCodigo,
           utm_source: utm.source,
@@ -126,7 +127,6 @@ export default function NuevoProspecto() {
 
       const j = (await r.json()) as { ok?: boolean; error?: string };
 if (!j.ok) {
-  // Traducimos cualquier mensaje crudo de índice único
   if (
     j.error === 'DUPLICADO' ||
     /ux_prospectos_phone_e164|ux_prospectos_dni_norm|duplicate key value/i.test(j.error || '')
@@ -136,7 +136,10 @@ if (!j.ok) {
   if (j.error === 'CHECK_VIOLATION') {
     throw new Error('Revisa el formato de celular o DNI.');
   }
-  throw new Error(j.error || 'Error');
+  if (j.error === 'VALIDATION') {
+    throw new Error('Revisa los campos obligatorios o formatos.');
+  }
+  throw new Error('No se pudo registrar.');
 }
 
       setMsg('¡Registrado correctamente!');
