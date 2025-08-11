@@ -13,7 +13,7 @@ const PROYECTOS = [
   'ALTAVISTA'
 ];
 
-// Función para evitar llamadas excesivas (debounce)
+// Debounce para evitar llamadas excesivas
 const debounce = (fn: Function, ms = 400) => {
   let t: any;
   return (...args: any[]) => {
@@ -22,11 +22,14 @@ const debounce = (fn: Function, ms = 400) => {
   };
 };
 
-// Llamada al API para verificar duplicados
-async function apiCheckDuplicate(celular?: string, dni?: string) {
+// API de pre-chequeo (ahora recibe el token para el header)
+async function apiCheckDuplicate(celular?: string, dni?: string, token?: string | null) {
   const r = await fetch('/api/prospectos/check', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'x-opc-token': token || ''
+    },
     body: JSON.stringify({ celular, dni }),
   });
   const j = await r.json();
@@ -50,26 +53,35 @@ export default function NuevoProspecto() {
   const [proyecto, setProyecto] = useState(PROYECTOS[0]);
   const [comentario, setComentario] = useState('');
 
-  const [asesorCodigo, setAsesorCodigo] = useState('');
   const [utm, setUtm] = useState({ source: '', medium: '', campaign: '' });
   const [geo, setGeo] = useState<{ lat?: number; lon?: number }>({});
   const [web, setWeb] = useState(''); // honeypot
 
+  // Token del OPC autorizado
+  const [opcToken, setOpcToken] = useState<string | null>(null);
+
+  // Estado de duplicado para UX
   const [dup, setDup] = useState<null | 'celular' | 'dni'>(null);
 
-  const debouncedPrecheck = useMemo(
-    () =>
-      debounce(async (c: string, d: string) => {
-        const r = await apiCheckDuplicate(c || undefined, d || undefined);
-        setDup(r.exists ? (r.match_on as 'celular' | 'dni') : null);
-      }, 450),
-    []
-  );
-
+  // Lee token de la URL o de localStorage y guarda UTM/asesor si necesitas
   useEffect(() => {
     if (!router.isReady) return;
     const q = router.query;
-    if (typeof q.asesor === 'string') setAsesorCodigo(q.asesor);
+
+    // Token ?t= o ?token=
+    const qsToken =
+      (typeof q.t === 'string' && q.t) ||
+      (typeof q.token === 'string' && q.token) ||
+      null;
+
+    if (qsToken) {
+      localStorage.setItem('opc_token', qsToken);
+      setOpcToken(qsToken);
+    } else {
+      const stored = typeof window !== 'undefined' ? localStorage.getItem('opc_token') : null;
+      setOpcToken(stored);
+    }
+
     setUtm({
       source: (q.utm_source as string) || '',
       medium: (q.utm_medium as string) || '',
@@ -77,6 +89,7 @@ export default function NuevoProspecto() {
     });
   }, [router.isReady, router.query]);
 
+  // Geolocalización (si no quieres pedir permiso, elimina este useEffect)
   useEffect(() => {
     if (!navigator?.geolocation) return;
     navigator.geolocation.getCurrentPosition(
@@ -90,13 +103,28 @@ export default function NuevoProspecto() {
     return v.replace(/[^\d+()\s-]/g, '');
   }
 
+  const debouncedPrecheck = useMemo(
+    () =>
+      debounce(async (c: string, d: string) => {
+        const r = await apiCheckDuplicate(c || undefined, d || undefined, opcToken);
+        setDup(r.exists ? (r.match_on as 'celular' | 'dni') : null);
+      }, 450),
+    // importante: volver a crear el debounce si cambia el token
+    [opcToken]
+  );
+
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
     setMsg(null);
     try {
+      // Si no hay token: bloquear
+      if (!opcToken) {
+        throw new Error('No autorizado: solicita un enlace válido de captura.');
+      }
+
       // Pre-chequeo rápido antes de enviar
-      const pre = await apiCheckDuplicate(celular, dniCe);
+      const pre = await apiCheckDuplicate(celular, dniCe, opcToken);
       if (pre.exists) {
         setDup(pre.match_on);
         setLoading(false);
@@ -105,7 +133,10 @@ export default function NuevoProspecto() {
 
       const r = await fetch('/api/prospectos', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-opc-token': opcToken || ''
+        },
         body: JSON.stringify({
           lugar_prospeccion: lugarProspeccion,
           nombre,
@@ -115,7 +146,7 @@ export default function NuevoProspecto() {
           email,
           proyecto_interes: proyecto === 'NINGUNO' ? null : proyecto,
           comentario,
-          asesor_codigo: asesorCodigo,
+          // asesor_codigo se ignora en el backend; se toma del token
           utm_source: utm.source,
           utm_medium: utm.medium,
           utm_campaign: utm.campaign,
@@ -126,21 +157,24 @@ export default function NuevoProspecto() {
       });
 
       const j = (await r.json()) as { ok?: boolean; error?: string };
-if (!j.ok) {
-  if (
-    j.error === 'DUPLICADO' ||
-    /ux_prospectos_phone_e164|ux_prospectos_dni_norm|duplicate key value/i.test(j.error || '')
-  ) {
-    throw new Error('Ya existe un prospecto con el mismo celular o DNI.');
-  }
-  if (j.error === 'CHECK_VIOLATION') {
-    throw new Error('Revisa el formato de celular o DNI.');
-  }
-  if (j.error === 'VALIDATION') {
-    throw new Error('Revisa los campos obligatorios o formatos.');
-  }
-  throw new Error('No se pudo registrar.');
-}
+      if (!j.ok) {
+        if (
+          j.error === 'DUPLICADO' ||
+          /ux_prospectos_phone_e164|ux_prospectos_dni_norm|duplicate key value/i.test(j.error || '')
+        ) {
+          throw new Error('Ya existe un prospecto con el mismo celular o DNI.');
+        }
+        if (j.error === 'CHECK_VIOLATION') {
+          throw new Error('Revisa el formato de celular o DNI.');
+        }
+        if (j.error === 'VALIDATION') {
+          throw new Error('Revisa los campos obligatorios o formatos.');
+        }
+        if (j.error === 'NO_AUTORIZADO') {
+          throw new Error('No autorizado: este enlace de captura no es válido o fue revocado.');
+        }
+        throw new Error('No se pudo registrar.');
+      }
 
       setMsg('¡Registrado correctamente!');
       setLugarProspeccion(''); setNombre(''); setApellido('');
@@ -158,6 +192,13 @@ if (!j.ok) {
   return (
     <main className="mx-auto max-w-xl p-6">
       <h1 className="text-2xl font-semibold mb-4">Registro de Prospecto</h1>
+
+      {!opcToken && (
+        <p className="text-sm text-red-600 mb-3">
+          No autorizado: este enlace no es válido. Solicita un link de captura a tu administrador.
+        </p>
+      )}
+
       <form onSubmit={onSubmit} className="space-y-4">
         {/* honeypot */}
         <div style={{ display: 'none' }}>
@@ -233,9 +274,6 @@ if (!j.ok) {
                     placeholder="Notas, preferencias, etc." />
         </div>
 
-        {/* oculto para atribución por URL */}
-        <input type="hidden" value={asesorCodigo} readOnly />
-
         {dup && (
           <p className="text-sm text-red-600">
             Ya existe un prospecto con este {dup === 'celular' ? 'celular' : 'DNI'}.
@@ -244,7 +282,7 @@ if (!j.ok) {
 
         {msg && <p className="text-sm mt-2">{msg}</p>}
 
-        <button disabled={loading || !!dup} className="px-4 py-2 rounded bg-black text-white">
+        <button disabled={loading || !!dup || !opcToken} className="px-4 py-2 rounded bg-black text-white">
           {loading ? 'Enviando…' : 'Registrar'}
         </button>
       </form>

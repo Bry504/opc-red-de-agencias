@@ -25,28 +25,47 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   try {
     const body = (req.body ?? {}) as Record<string, unknown>;
 
-    // honeypot
+    // ======= AUTORIZACIÓN OPC (token revocable) =======
+    const tokenHeader = req.headers['x-opc-token'];
+    const opcToken =
+      (typeof tokenHeader === 'string' && tokenHeader) ||
+      (typeof body['opc_token'] === 'string' ? (body['opc_token'] as string) : '');
+
+    if (!opcToken) return res.status(200).json({ ok: false, error: 'NO_AUTORIZADO' });
+
+    const { data: opc, error: opcErr } = await supabase
+      .from('asesores')
+      .select('id,codigo,estado')
+      .eq('capture_token', opcToken)
+      .single();
+
+    if (opcErr || !opc || !opc.estado) {
+      return res.status(200).json({ ok: false, error: 'NO_AUTORIZADO' });
+    }
+
+    // ======= HONEYPOT (anti-bots) =======
     if (typeof body.web === 'string' && body.web.trim() !== '') {
       return res.status(200).json({ ok: true });
     }
 
-    // fields
+    // ======= Campos =======
     const lugar_prospeccion = (body['lugar_prospeccion'] as string) ?? null;
     const nombre            = (body['nombre'] as string) ?? '';
     const apellido          = (body['apellido'] as string) ?? '';
     const celularRaw        = (body['celular'] as string) ?? '';
     const dni_ce            = (body['dni_ce'] as string) ?? '';
     const email             = (body['email'] as string) ?? '';
-    const proyecto_interes  = (body['proyecto_interes'] as string) ?? null;
+    const proyectoRaw       = (body['proyecto_interes'] as string) ?? null;
+    const proyecto_interes  = proyectoRaw === 'NINGUNO' ? null : proyectoRaw;
     const comentario        = (body['comentario'] as string) ?? null;
-    const asesor_codigo     = (body['asesor_codigo'] as string) ?? null;
+    // asesor_codigo del front se ignora: usaremos el del OPC validado
     const utm_source        = (body['utm_source'] as string) ?? null;
     const utm_medium        = (body['utm_medium'] as string) ?? null;
     const utm_campaign      = (body['utm_campaign'] as string) ?? null;
     const lat               = (body['lat'] as number | undefined) ?? null;
     const lon               = (body['lon'] as number | undefined) ?? null;
 
-    // server validation
+    // ======= Validaciones mínimas (server) =======
     if (!nombre.trim())   return res.status(200).json({ ok: false, error: 'VALIDATION' });
     if (!apellido.trim()) return res.status(200).json({ ok: false, error: 'VALIDATION' });
 
@@ -55,12 +74,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     if (!isValidDniCe(dni_ce))            return res.status(200).json({ ok: false, error: 'VALIDATION' });
     if (!isValidEmail(email))             return res.status(200).json({ ok: false, error: 'VALIDATION' });
 
-    // traces
+    // ======= Trazas (opcional) =======
     const ipHeader = req.headers['x-forwarded-for'];
-    const ip = (typeof ipHeader === 'string' && ipHeader) ? ipHeader.split(',')[0].trim() : req.socket.remoteAddress || null;
+    const ip = (typeof ipHeader === 'string' && ipHeader)
+      ? ipHeader.split(',')[0].trim()
+      : req.socket.remoteAddress || null;
     const ua = req.headers['user-agent'] || null;
 
-    // insert
+    // ======= Inserción =======
     const { data, error } = await supabase
       .from('prospectos')
       .insert([{
@@ -72,7 +93,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         email: email?.trim() || null,
         proyecto_interes,
         comentario,
-        asesor_codigo,
+        asesor_codigo: opc.codigo,     // <- SIEMPRE desde token validado
         utm_source, utm_medium, utm_campaign,
         lat, lon,
         user_agent: ua,
@@ -82,7 +103,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       .single();
 
     if (error) {
-      // @ts-ignore códigos Postgres
+      // códigos Postgres
+      // @ts-ignore
       if (error.code === '23505') return res.status(200).json({ ok: false, error: 'DUPLICADO' });
       // @ts-ignore
       if (error.code === '23514') return res.status(200).json({ ok: false, error: 'CHECK_VIOLATION' });
