@@ -25,21 +25,29 @@ function isValidEmail(v?: string) {
 
 // --- Envío a HighLevel ---
 // Usa Upsert para evitar duplicados por email/phone y luego agrega tags "OPC" y "OPC:<codigo>"
+// --- Envío a HighLevel (API v2) ---
+// Upsert evita duplicados; luego agrega tags "OPC" y "OPC:<codigo>"
 async function pushToHighLevel({
   nombre, apellido, celular9, email, proyecto, opcCodigo,
 }: {
   nombre: string; apellido: string; celular9: string; email?: string | null; proyecto: string | null; opcCodigo: string;
 }) {
-  if (!GHL_TOKEN || !GHL_LOCATION_ID) return { ok: false, skipped: true };
+  if (!GHL_TOKEN || !GHL_LOCATION_ID) {
+    console.warn('GHL: faltan envs GHL_ACCESS_TOKEN o GHL_LOCATION_ID');
+    return { ok: false, skipped: true };
+  }
 
   const phoneE164 = celular9 ? `+51${celular9}` : undefined;
 
-  // 1) Upsert Contact
+  // 1) Upsert Contact (v2 requiere header Version)
   const upsertRes = await fetch('https://services.leadconnectorhq.com/contacts/upsert', {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${GHL_TOKEN}`,
       'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      'Version': '2021-07-28',
+      'Location-Id': GHL_LOCATION_ID, // útil en algunas configs
     },
     body: JSON.stringify({
       locationId: GHL_LOCATION_ID,
@@ -47,24 +55,25 @@ async function pushToHighLevel({
       lastName: apellido,
       email: email || undefined,
       phone: phoneE164,
-      source: 'OPC', // identificación adicional
+      source: 'OPC',
     }),
   });
 
-  const upsertJson: any = await upsertRes.json();
-  const contactId = upsertJson?.id || upsertJson?.contact?.id;
-
-  if (!contactId) {
-    // si falla, lo dejamos en log para revisar luego
-    console.warn('HighLevel upsert failed:', upsertJson);
+  if (!upsertRes.ok) {
+    const t = await upsertRes.text().catch(() => '');
+    console.warn('GHL upsert failed', upsertRes.status, t);
     return { ok: false };
   }
 
-  // 2) Add Tags (no sobreescribe otras)
-  const tags: string[] = [
-    'OPC',
-    `OPC:${opcCodigo}`,
-  ];
+  const upsertJson: any = await upsertRes.json().catch(() => ({}));
+  const contactId = upsertJson?.id || upsertJson?.contact?.id;
+  if (!contactId) {
+    console.warn('GHL upsert sin id', upsertJson);
+    return { ok: false };
+  }
+
+  // 2) Add Tags (no bloqueante)
+  const tags: string[] = ['OPC', `OPC:${opcCodigo}`];
   if (proyecto) tags.push(`PROY:${proyecto}`);
 
   const tagRes = await fetch(`https://services.leadconnectorhq.com/contacts/${contactId}/tags`, {
@@ -72,14 +81,15 @@ async function pushToHighLevel({
     headers: {
       'Authorization': `Bearer ${GHL_TOKEN}`,
       'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      'Version': '2021-07-28',
     },
     body: JSON.stringify({ tags }),
   });
 
-  // No bloqueamos el flujo si esto falla
   if (!tagRes.ok) {
     const tj = await tagRes.text().catch(() => '');
-    console.warn('HighLevel add-tags failed:', tj);
+    console.warn('GHL add-tags failed', tagRes.status, tj);
   }
 
   return { ok: true, contactId };
