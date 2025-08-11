@@ -87,8 +87,9 @@ export default function NuevoProspecto() {
       setLugarProspeccion(''); setNombre(''); setApellido('');
       setCelular(''); setDniCe(''); setEmail('');
       setProyecto(PROYECTOS[0]); setComentario('');
-    } catch (err: any) {
-      setMsg(err.message || 'No se pudo registrar');
+    } catch (err: unknown) {
+    const m = err instanceof Error ? err.message : 'No se pudo registrar';
+    setMsg(m);
     } finally {
       setLoading(false);
     }

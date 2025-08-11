@@ -85,7 +85,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     if (error) return res.status(500).json({ ok: false, error: error.message });
     return res.status(200).json({ ok: true, id: data.id });
-  } catch (e: any) {
-    return res.status(500).json({ ok: false, error: e?.message || 'Error inesperado' });
+   } catch (e: unknown) {
+  const msg = e instanceof Error ? e.message : 'Error inesperado';
+  return res.status(500).json({ ok: false, error: msg });
   }
 }
