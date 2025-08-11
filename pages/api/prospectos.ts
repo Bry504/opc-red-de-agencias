@@ -118,25 +118,28 @@ async function pushToHighLevel({
   }
 
   // 3) Crear Oportunidad (pipelineStageId)
-  const pipelineId = process.env.GHL_PIPELINE_ID!;
-  const pipelineStageId = process.env.GHL_STAGE_ID_PROSPECCION!;
-  if (!pipelineId || !pipelineStageId) {
-    console.warn('GHL: faltan GHL_PIPELINE_ID o GHL_STAGE_ID_PROSPECCION');
-    return { ok: true, contactId };
-  }
+const pipelineId = process.env.GHL_PIPELINE_ID!;
+const pipelineStageId = process.env.GHL_STAGE_ID_PROSPECCION!;
+if (!pipelineId || !pipelineStageId) {
+  console.warn('GHL: faltan GHL_PIPELINE_ID o GHL_STAGE_ID_PROSPECCION');
+  return { ok: true, contactId };
+}
 
-  const oppPayload = {
-    locationId: GHL_LOCATION_ID,
-    contactId,
-    pipelineId,
-    pipelineStageId, // campo correcto
-    status: 'open',
-    source: 'OPC',
-    name: `${nombre} ${apellido} - OPC:${opcCodigo}${proyecto ? ` - ${proyecto}` : ''}`,
-  };
-  console.info('GHL opp payload', oppPayload);
+const oppPayload = {
+  locationId: GHL_LOCATION_ID,
+  contactId,
+  pipelineId,
+  pipelineStageId, // campo correcto en v2
+  status: 'open',
+  source: 'OPC',
+  name: `${nombre} ${apellido} - OPC:${opcCodigo}${proyecto ? ` - ${proyecto}` : ''}`,
+};
 
-  const oppRes = await fetch('https://services.leadconnectorhq.com/opportunities/', {
+// Forzamos WARN para que salga en Vercel aunque esté filtrado a “Warnings”
+console.warn('GHL opp payload', oppPayload);
+
+async function postOpp(url: string) {
+  const res = await fetch(url, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${GHL_TOKEN}`,
@@ -147,17 +150,28 @@ async function pushToHighLevel({
     },
     body: JSON.stringify(oppPayload),
   });
+  return res;
+}
 
-  if (!oppRes.ok) {
-    const ot = await oppRes.text().catch(() => '');
-    console.warn('GHL opportunity failed', oppRes.status, ot);
-    return { ok: true, contactId };
-  }
+// 1er intento: services
+let oppRes = await postOpp('https://services.leadconnectorhq.com/opportunities/');
 
-  const oppJson: any = await oppRes.json().catch(() => ({}));
-  const opportunityId = oppJson?.id;
-  console.info('GHL opportunity OK', opportunityId);
-  return { ok: true, contactId, opportunityId };
+// Si devuelve 404, reintentamos en api.*
+if (oppRes.status === 404) {
+  console.warn('GHL opportunities 404 en services; reintentando en api.leadconnectorhq.com');
+  oppRes = await postOpp('https://api.leadconnectorhq.com/opportunities/');
+}
+
+if (!oppRes.ok) {
+  const ot = await oppRes.text().catch(() => '');
+  console.warn('GHL opportunity failed', oppRes.status, ot);
+  return { ok: true, contactId };
+}
+
+const oppJson: any = await oppRes.json().catch(() => ({}));
+const opportunityId = oppJson?.id;
+console.warn('GHL opportunity OK', opportunityId);
+return { ok: true, contactId, opportunityId };
 }
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
