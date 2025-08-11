@@ -23,10 +23,6 @@ function isValidEmail(v?: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
 }
 
-// --- Envío a HighLevel ---
-// Usa Upsert para evitar duplicados por email/phone y luego agrega tags "OPC" y "OPC:<codigo>"
-// --- Envío a HighLevel (API v2) ---
-// Upsert evita duplicados; luego agrega tags "OPC" y "OPC:<codigo>"
 // --- Envío a HighLevel (contacto + tags + oportunidad en PROSPECCIÓN) ---
 async function pushToHighLevel({
   nombre, apellido, celular9, email, proyecto, opcCodigo,
@@ -74,29 +70,33 @@ async function pushToHighLevel({
   }
 
   // 2) Tags para identificar OPC
-  const tags: string[] = ['OPC', `OPC:${opcCodigo}`];
-  if (proyecto) tags.push(`PROY:${proyecto}`);
+  try {
+    const tags: string[] = ['OPC', `OPC:${opcCodigo}`];
+    if (proyecto) tags.push(`PROY:${proyecto}`);
 
-  const tagRes = await fetch(`https://services.leadconnectorhq.com/contacts/${contactId}/tags`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${GHL_TOKEN}`,
-      'Content-Type': 'application/json',
-      'Accept': 'application/json',
-      'Version': '2021-07-28',
-    },
-    body: JSON.stringify({ tags }),
-  });
-  if (!tagRes.ok) {
-    const tj = await tagRes.text().catch(() => '');
-    console.warn('GHL add-tags failed', tagRes.status, tj);
+    const tagRes = await fetch(`https://services.leadconnectorhq.com/contacts/${contactId}/tags`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${GHL_TOKEN}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Version': '2021-07-28',
+      },
+      body: JSON.stringify({ tags }),
+    });
+    if (!tagRes.ok) {
+      const tj = await tagRes.text().catch(() => '');
+      console.warn('GHL add-tags failed', tagRes.status, tj);
+    }
+  } catch (e) {
+    console.warn('GHL add-tags error', e);
   }
 
   // 3) Crear Oportunidad en FLUJO OPC → PROSPECCIÓN (sin workflow)
   const pipelineId = process.env.GHL_PIPELINE_ID;
-  const stageId = process.env.GHL_STAGE_ID_PROSPECCION;
+  const pipelineStageId = process.env.GHL_STAGE_ID_PROSPECCION; // OJO: pipelineStageId (no "stageId")
 
-  if (!pipelineId || !stageId) {
+  if (!pipelineId || !pipelineStageId) {
     console.warn('GHL: faltan GHL_PIPELINE_ID o GHL_STAGE_ID_PROSPECCION');
     return { ok: true, contactId }; // contacto creado, sin oportunidad
   }
@@ -114,7 +114,7 @@ async function pushToHighLevel({
       locationId: GHL_LOCATION_ID,
       contactId,
       pipelineId,
-      stageId,
+      pipelineStageId,                      // ← campo correcto en API v2
       status: 'open',
       source: 'OPC',
       name: `${nombre} ${apellido} - OPC:${opcCodigo}${proyecto ? ` - ${proyecto}` : ''}`,
@@ -124,7 +124,7 @@ async function pushToHighLevel({
   if (!oppRes.ok) {
     const ot = await oppRes.text().catch(() => '');
     console.warn('GHL opportunity failed', oppRes.status, ot);
-    return { ok: true, contactId }; // no bloqueamos el flujo
+    return { ok: true, contactId }; // no bloqueamos el flujo si falla
   }
 
   const oppJson: any = await oppRes.json().catch(() => ({}));
@@ -233,7 +233,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         opcCodigo: opc.codigo,
       });
     } catch (e) {
-      // no detenemos la respuesta al usuario si falla el push
       console.warn('pushToHighLevel error:', e);
     }
 
