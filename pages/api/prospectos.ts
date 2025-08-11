@@ -6,6 +6,10 @@ const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.SUPABAS
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
+// ===== HighLevel / LeadConnector env =====
+const GHL_TOKEN = process.env.GHL_ACCESS_TOKEN ?? '';
+const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID ?? '';
+
 // --- utils ---
 function cleanPhone(v: string) { return v?.replace(/\D/g, '').slice(-9); }
 function isValidDniCe(v?: string) {
@@ -17,6 +21,68 @@ function isValidDniCe(v?: string) {
 function isValidEmail(v?: string) {
   if (!v) return true;
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
+}
+
+// --- Envío a HighLevel ---
+// Usa Upsert para evitar duplicados por email/phone y luego agrega tags "OPC" y "OPC:<codigo>"
+async function pushToHighLevel({
+  nombre, apellido, celular9, email, proyecto, opcCodigo,
+}: {
+  nombre: string; apellido: string; celular9: string; email?: string | null; proyecto: string | null; opcCodigo: string;
+}) {
+  if (!GHL_TOKEN || !GHL_LOCATION_ID) return { ok: false, skipped: true };
+
+  const phoneE164 = celular9 ? `+51${celular9}` : undefined;
+
+  // 1) Upsert Contact
+  const upsertRes = await fetch('https://services.leadconnectorhq.com/contacts/upsert', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${GHL_TOKEN}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      locationId: GHL_LOCATION_ID,
+      firstName: nombre,
+      lastName: apellido,
+      email: email || undefined,
+      phone: phoneE164,
+      source: 'OPC', // identificación adicional
+    }),
+  });
+
+  const upsertJson: any = await upsertRes.json();
+  const contactId = upsertJson?.id || upsertJson?.contact?.id;
+
+  if (!contactId) {
+    // si falla, lo dejamos en log para revisar luego
+    console.warn('HighLevel upsert failed:', upsertJson);
+    return { ok: false };
+  }
+
+  // 2) Add Tags (no sobreescribe otras)
+  const tags: string[] = [
+    'OPC',
+    `OPC:${opcCodigo}`,
+  ];
+  if (proyecto) tags.push(`PROY:${proyecto}`);
+
+  const tagRes = await fetch(`https://services.leadconnectorhq.com/contacts/${contactId}/tags`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${GHL_TOKEN}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ tags }),
+  });
+
+  // No bloqueamos el flujo si esto falla
+  if (!tagRes.ok) {
+    const tj = await tagRes.text().catch(() => '');
+    console.warn('HighLevel add-tags failed:', tj);
+  }
+
+  return { ok: true, contactId };
 }
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -58,7 +124,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const proyectoRaw       = (body['proyecto_interes'] as string) ?? null;
     const proyecto_interes  = proyectoRaw === 'NINGUNO' ? null : proyectoRaw;
     const comentario        = (body['comentario'] as string) ?? null;
-    // asesor_codigo del front se ignora: usaremos el del OPC validado
     const utm_source        = (body['utm_source'] as string) ?? null;
     const utm_medium        = (body['utm_medium'] as string) ?? null;
     const utm_campaign      = (body['utm_campaign'] as string) ?? null;
@@ -81,7 +146,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       : req.socket.remoteAddress || null;
     const ua = req.headers['user-agent'] || null;
 
-    // ======= Inserción =======
+    // ======= Inserción en BD =======
     const { data, error } = await supabase
       .from('prospectos')
       .insert([{
@@ -93,7 +158,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         email: email?.trim() || null,
         proyecto_interes,
         comentario,
-        asesor_codigo: opc.codigo,     // <- SIEMPRE desde token validado
+        asesor_codigo: opc.codigo,     // SIEMPRE desde token validado
         utm_source, utm_medium, utm_campaign,
         lat, lon,
         user_agent: ua,
@@ -109,6 +174,21 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       // @ts-ignore
       if (error.code === '23514') return res.status(200).json({ ok: false, error: 'CHECK_VIOLATION' });
       return res.status(200).json({ ok: false, error: 'ERROR_DESCONOCIDO' });
+    }
+
+    // ======= Sincroniza a HighLevel (no bloqueante) =======
+    try {
+      await pushToHighLevel({
+        nombre,
+        apellido,
+        celular9: celular,
+        email,
+        proyecto: proyecto_interes,
+        opcCodigo: opc.codigo,
+      });
+    } catch (e) {
+      // no detenemos la respuesta al usuario si falla el push
+      console.warn('pushToHighLevel error:', e);
     }
 
     return res.status(200).json({ ok: true, id: data.id });
