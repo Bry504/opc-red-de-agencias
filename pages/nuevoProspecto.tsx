@@ -1,5 +1,5 @@
 /* eslint-disable */
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { useRouter } from 'next/router';
 
 const PROYECTOS = [
@@ -11,6 +11,29 @@ const PROYECTOS = [
   'BUONAVISTA',
   'ALTAVISTA'
 ];
+
+// Función para evitar llamadas excesivas (debounce)
+const debounce = (fn: Function, ms = 400) => {
+  let t: any;
+  return (...args: any[]) => {
+    clearTimeout(t);
+    t = setTimeout(() => fn(...args), ms);
+  };
+};
+
+// Llamada al API para verificar duplicados
+async function apiCheckDuplicate(celular?: string, dni?: string) {
+  const r = await fetch('/api/prospectos/check', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ celular, dni }),
+  });
+  const j = await r.json();
+  return (j ?? { exists: false, match_on: null }) as {
+    exists: boolean;
+    match_on: null | 'celular' | 'dni';
+  };
+}
 
 export default function NuevoProspecto() {
   const router = useRouter();
@@ -30,6 +53,17 @@ export default function NuevoProspecto() {
   const [utm, setUtm] = useState({ source: '', medium: '', campaign: '' });
   const [geo, setGeo] = useState<{ lat?: number; lon?: number }>({});
   const [web, setWeb] = useState(''); // honeypot
+
+  const [dup, setDup] = useState<null | 'celular' | 'dni'>(null);
+
+  const debouncedPrecheck = useMemo(
+    () =>
+      debounce(async (c: string, d: string) => {
+        const r = await apiCheckDuplicate(c || undefined, d || undefined);
+        setDup(r.exists ? (r.match_on as 'celular' | 'dni') : null);
+      }, 450),
+    []
+  );
 
   useEffect(() => {
     if (!router.isReady) return;
@@ -60,6 +94,14 @@ export default function NuevoProspecto() {
     setLoading(true);
     setMsg(null);
     try {
+      // Pre-chequeo rápido antes de enviar
+      const pre = await apiCheckDuplicate(celular, dniCe);
+      if (pre.exists) {
+        setDup(pre.match_on);
+        setLoading(false);
+        return;
+      }
+
       const r = await fetch('/api/prospectos', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -81,12 +123,27 @@ export default function NuevoProspecto() {
           web // honeypot
         })
       });
+
       const j = (await r.json()) as { ok?: boolean; error?: string };
-      if (!j.ok) throw new Error(j.error || 'Error');
+if (!j.ok) {
+  // Traducimos cualquier mensaje crudo de índice único
+  if (
+    j.error === 'DUPLICADO' ||
+    /ux_prospectos_phone_e164|ux_prospectos_dni_norm|duplicate key value/i.test(j.error || '')
+  ) {
+    throw new Error('Ya existe un prospecto con el mismo celular o DNI.');
+  }
+  if (j.error === 'CHECK_VIOLATION') {
+    throw new Error('Revisa el formato de celular o DNI.');
+  }
+  throw new Error(j.error || 'Error');
+}
+
       setMsg('¡Registrado correctamente!');
       setLugarProspeccion(''); setNombre(''); setApellido('');
       setCelular(''); setDniCe(''); setEmail('');
       setProyecto(PROYECTOS[0]); setComentario('');
+      setDup(null);
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : 'No se pudo registrar';
       setMsg(m);
@@ -130,14 +187,24 @@ export default function NuevoProspecto() {
           <label className="block text-sm mb-1">Celular (Perú) <span className="text-red-600">*</span></label>
           <input className="w-full border rounded p-2"
                  inputMode="numeric" pattern="[0-9\s+()-]*" required
-                 value={celular} onChange={(e) => setCelular(normalizePhone(e.target.value))}
+                 value={celular}
+                 onChange={(e) => {
+                   const v = normalizePhone(e.target.value);
+                   setCelular(v);
+                   debouncedPrecheck(v, dniCe);
+                 }}
                  placeholder="9 dígitos" />
         </div>
 
         <div>
           <label className="block text-sm mb-1">DNI / CE</label>
           <input className="w-full border rounded p-2"
-                 value={dniCe} onChange={(e) => setDniCe(e.target.value.toUpperCase())}
+                 value={dniCe}
+                 onChange={(e) => {
+                   const v = e.target.value.toUpperCase();
+                   setDniCe(v);
+                   debouncedPrecheck(celular, v);
+                 }}
                  placeholder="DNI: 8 dígitos / CE: 9-12 alfanum." />
         </div>
 
@@ -166,11 +233,17 @@ export default function NuevoProspecto() {
         {/* oculto para atribución por URL */}
         <input type="hidden" value={asesorCodigo} readOnly />
 
-        <button disabled={loading} className="px-4 py-2 rounded bg-black text-white">
-          {loading ? 'Enviando…' : 'Registrar'}
-        </button>
+        {dup && (
+          <p className="text-sm text-red-600">
+            Ya existe un prospecto con este {dup === 'celular' ? 'celular' : 'DNI'}.
+          </p>
+        )}
 
         {msg && <p className="text-sm mt-2">{msg}</p>}
+
+        <button disabled={loading || !!dup} className="px-4 py-2 rounded bg-black text-white">
+          {loading ? 'Enviando…' : 'Registrar'}
+        </button>
       </form>
     </main>
   );
