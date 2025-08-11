@@ -1,7 +1,6 @@
 /* eslint-disable */
 import { useEffect, useState, useMemo } from 'react';
 import { useRouter } from 'next/router';
-import '@/styles/form.css'; // ⬅️ importa el estilo
 
 const PROYECTOS = [
   'NINGUNO',
