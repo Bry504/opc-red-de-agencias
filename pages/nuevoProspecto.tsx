@@ -16,7 +16,6 @@ export default function NuevoProspecto() {
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
-  // Campos
   const [lugarProspeccion, setLugarProspeccion] = useState('');
   const [nombre, setNombre] = useState('');
   const [apellido, setApellido] = useState('');
@@ -26,10 +25,9 @@ export default function NuevoProspecto() {
   const [proyecto, setProyecto] = useState(PROYECTOS[0]);
   const [comentario, setComentario] = useState('');
 
-  // Atribución opcional
   const [asesorCodigo, setAsesorCodigo] = useState('');
   const [utm, setUtm] = useState({ source: '', medium: '', campaign: '' });
-  const [geo, setGeo] = useState<{lat?: number; lon?: number}>({});
+  const [geo, setGeo] = useState<{ lat?: number; lon?: number }>({});
   const [web, setWeb] = useState(''); // honeypot
 
   useEffect(() => {
@@ -47,7 +45,8 @@ export default function NuevoProspecto() {
     if (!navigator?.geolocation) return;
     navigator.geolocation.getCurrentPosition(
       (pos) => setGeo({ lat: pos.coords.latitude, lon: pos.coords.longitude }),
-      () => {}, { enableHighAccuracy: false, maximumAge: 60000, timeout: 4000 }
+      () => {},
+      { enableHighAccuracy: false, maximumAge: 60000, timeout: 4000 }
     );
   }, []);
 
@@ -65,7 +64,8 @@ export default function NuevoProspecto() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           lugar_prospeccion: lugarProspeccion,
-          nombre, apellido,
+          nombre,
+          apellido,
           celular,
           dni_ce: dniCe,
           email,
@@ -75,21 +75,20 @@ export default function NuevoProspecto() {
           utm_source: utm.source,
           utm_medium: utm.medium,
           utm_campaign: utm.campaign,
-          lat: geo.lat, lon: geo.lon,
+          lat: geo.lat,
+          lon: geo.lon,
           web // honeypot
         })
       });
-      const j = await r.json();
+      const j = (await r.json()) as { ok?: boolean; error?: string };
       if (!j.ok) throw new Error(j.error || 'Error');
       setMsg('¡Registrado correctamente!');
-
-      // limpiar
       setLugarProspeccion(''); setNombre(''); setApellido('');
       setCelular(''); setDniCe(''); setEmail('');
       setProyecto(PROYECTOS[0]); setComentario('');
     } catch (err: unknown) {
-    const m = err instanceof Error ? err.message : 'No se pudo registrar';
-    setMsg(m);
+      const m = err instanceof Error ? err.message : 'No se pudo registrar';
+      setMsg(m);
     } finally {
       setLoading(false);
     }
@@ -102,7 +101,7 @@ export default function NuevoProspecto() {
         {/* honeypot */}
         <div style={{ display: 'none' }}>
           <label>Tu web
-            <input value={web} onChange={(e)=>setWeb(e.target.value)} />
+            <input value={web} onChange={(e) => setWeb(e.target.value)} />
           </label>
         </div>
 
@@ -110,56 +109,56 @@ export default function NuevoProspecto() {
           <label className="block text-sm mb-1">Lugar de prospección</label>
           <input className="w-full border rounded p-2"
                  value={lugarProspeccion}
-                 onChange={e=>setLugarProspeccion(e.target.value)}
+                 onChange={(e) => setLugarProspeccion(e.target.value)}
                  placeholder="Ej: Evento, Calle, Centro comercial" />
         </div>
 
         <div>
           <label className="block text-sm mb-1">Nombre <span className="text-red-600">*</span></label>
           <input className="w-full border rounded p-2" required
-                 value={nombre} onChange={e=>setNombre(e.target.value)} />
+                 value={nombre} onChange={(e) => setNombre(e.target.value)} />
         </div>
 
         <div>
           <label className="block text-sm mb-1">Apellido <span className="text-red-600">*</span></label>
           <input className="w-full border rounded p-2" required
-                 value={apellido} onChange={e=>setApellido(e.target.value)} />
+                 value={apellido} onChange={(e) => setApellido(e.target.value)} />
         </div>
 
         <div>
           <label className="block text-sm mb-1">Celular (Perú) <span className="text-red-600">*</span></label>
           <input className="w-full border rounded p-2"
                  inputMode="numeric" pattern="[0-9\s+()-]*" required
-                 value={celular} onChange={e=>setCelular(normalizePhone(e.target.value))}
+                 value={celular} onChange={(e) => setCelular(normalizePhone(e.target.value))}
                  placeholder="9 dígitos" />
         </div>
 
         <div>
           <label className="block text-sm mb-1">DNI / CE</label>
           <input className="w-full border rounded p-2"
-                 value={dniCe} onChange={e=>setDniCe(e.target.value.toUpperCase())}
+                 value={dniCe} onChange={(e) => setDniCe(e.target.value.toUpperCase())}
                  placeholder="DNI: 8 dígitos / CE: 9-12 alfanum." />
         </div>
 
         <div>
           <label className="block text-sm mb-1">Correo</label>
           <input type="email" className="w-full border rounded p-2"
-                 value={email} onChange={e=>setEmail(e.target.value)}
+                 value={email} onChange={(e) => setEmail(e.target.value)}
                  placeholder="nombre@dominio.com" />
         </div>
 
         <div>
           <label className="block text-sm mb-1">Proyecto de interés</label>
           <select className="w-full border rounded p-2"
-                  value={proyecto} onChange={e=>setProyecto(e.target.value)}>
-            {PROYECTOS.map(p => <option key={p} value={p}>{p}</option>)}
+                  value={proyecto} onChange={(e) => setProyecto(e.target.value)}>
+            {PROYECTOS.map((p) => <option key={p} value={p}>{p}</option>)}
           </select>
         </div>
 
         <div>
           <label className="block text-sm mb-1">Comentario</label>
           <textarea className="w-full border rounded p-2" rows={3}
-                    value={comentario} onChange={e=>setComentario(e.target.value)}
+                    value={comentario} onChange={(e) => setComentario(e.target.value)}
                     placeholder="Notas, preferencias, etc." />
         </div>
 
