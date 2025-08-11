@@ -136,7 +136,7 @@ async function pushToHighLevel({
   };
   console.info('GHL opp payload', oppPayload);
 
-  const oppRes = await fetch('https://services.leadconnectorhq.com/opportunities', {
+  const oppRes = await fetch('https://services.leadconnectorhq.com/opportunities/', {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${GHL_TOKEN}`,
