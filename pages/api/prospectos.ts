@@ -11,6 +11,7 @@ const GHL_TOKEN = process.env.GHL_ACCESS_TOKEN ?? '';
 const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID ?? '';
 const GHL_PIPELINE_ID = process.env.GHL_PIPELINE_ID ?? '';
 const GHL_STAGE_ID_PROSPECCION = process.env.GHL_STAGE_ID_PROSPECCION ?? '';
+const GHL_CF_DNI_ID = process.env.GHL_CF_DNI_ID ?? ''; // ← ID del custom field DNI/CE en HighLevel
 
 // --- utils ---
 function cleanPhone(v: string) { return v?.replace(/\D/g, '').slice(-9); }
@@ -54,7 +55,21 @@ async function pushToHighLevel({
 
   const phoneE164 = celular9 ? `+51${celular9}` : undefined;
 
-  // 1) Upsert Contact
+  // 1) Upsert Contact (con Custom Field DNI/CE)
+  const upsertBody: any = {
+    locationId: GHL_LOCATION_ID,
+    firstName: nombre,
+    lastName: apellido,
+    email: email || undefined,
+    phone: phoneE164,
+    source: 'OPC',
+  };
+
+  // Si tenemos el ID del custom field y un valor de DNI/CE, lo enviamos aquí
+  if (GHL_CF_DNI_ID && dniCe && dniCe.trim()) {
+    upsertBody.customFields = [{ id: GHL_CF_DNI_ID, value: dniCe.trim() }];
+  }
+
   const upsertRes = await fetch('https://services.leadconnectorhq.com/contacts/upsert', {
     method: 'POST',
     headers: {
@@ -64,14 +79,7 @@ async function pushToHighLevel({
       Version: '2021-07-28',
       'Location-Id': GHL_LOCATION_ID,
     },
-    body: JSON.stringify({
-      locationId: GHL_LOCATION_ID,
-      firstName: nombre,
-      lastName: apellido,
-      email: email || undefined,
-      phone: phoneE164,
-      source: 'OPC',
-    }),
+    body: JSON.stringify(upsertBody),
   });
 
   if (!upsertRes.ok) {
@@ -111,13 +119,13 @@ async function pushToHighLevel({
   }
   console.info('GHL upsert OK', contactId);
 
-  // 2) Tags EXACTOS en el contacto (orden: código, proyecto, lugar, DNI)
+  // 2) Tags en el contacto (SIN DNI/CE)
   try {
     const tags = [
       (opcCodigo || '').trim(),
       (proyecto || '').trim(),
       (lugarProspeccion || '').trim(),
-      (dniCe || '').trim(),
+      // ← NOTA: retirado dniCe de tags
     ].filter(Boolean);
 
     if (tags.length) {
@@ -142,7 +150,7 @@ async function pushToHighLevel({
     console.warn('GHL add-tags error', e);
   }
 
-  // 3) Crear Oportunidad con el nombre EXACTO requerido
+  // 3) Crear Oportunidad (nombre "Nombre Apellido - OPC")
   if (!GHL_PIPELINE_ID || !GHL_STAGE_ID_PROSPECCION) {
     console.warn('GHL: faltan GHL_PIPELINE_ID o GHL_STAGE_ID_PROSPECCION');
     return { ok: true, contactId };
@@ -155,7 +163,7 @@ async function pushToHighLevel({
     pipelineStageId: GHL_STAGE_ID_PROSPECCION,
     status: 'open',
     source: 'OPC',
-    name: `${nombre} ${apellido} - OPC`, // ← "Nombre Apellido - OPC"
+    name: `${nombre} ${apellido} - OPC`,
   };
   console.warn('GHL opp payload', oppPayload);
 
@@ -200,7 +208,6 @@ async function pushToHighLevel({
         `Meta:\n- Código: ${opcCodigo || ''}\n- Proyecto: ${proyecto || ''}\n` +
         `- Lugar prospección: ${lugarProspeccion || ''}\n- DNI/CE: ${dniCe || ''}`;
 
-      // endpoint correcto: POST /contacts/{contactId}/notes
       const noteResp = await fetch(
         `https://services.leadconnectorhq.com/contacts/${contactId}/notes`,
         {
@@ -212,7 +219,7 @@ async function pushToHighLevel({
             Version: '2021-07-28',
             'Location-Id': GHL_LOCATION_ID,
           },
-          body: JSON.stringify({ body: noteBody }), // solo 'body'
+          body: JSON.stringify({ body: noteBody }),
         }
       );
 
