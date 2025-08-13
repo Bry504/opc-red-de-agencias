@@ -14,17 +14,31 @@ const PROYECTOS = [
 ];
 
 // Debounce
-const debounce = (fn: Function, ms = 400) => { let t:any; return (...args:any[])=>{ clearTimeout(t); t=setTimeout(()=>fn(...args),ms); }; };
+const debounce = (fn: Function, ms = 400) => {
+  let t: any;
+  return (...args: any[]) => {
+    clearTimeout(t);
+    t = setTimeout(() => fn(...args), ms);
+  };
+};
 
-// Pre-check con token
-async function apiCheckDuplicate(celular?: string, dni?: string, token?: string | null) {
+// Pre-check con token (ahora incluye email)
+async function apiCheckDuplicate(
+  celular?: string,
+  dni?: string,
+  email?: string,
+  token?: string | null
+) {
   const r = await fetch('/api/prospectos/check', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-opc-token': token || '' },
-    body: JSON.stringify({ celular, dni }),
+    body: JSON.stringify({ celular, dni, email }),
   });
   const j = await r.json();
-  return (j ?? { exists:false, match_on:null }) as { exists:boolean; match_on:null|'celular'|'dni' };
+  return (j ?? { exists: false, match_on: null }) as {
+    exists: boolean;
+    match_on: null | 'celular' | 'dni' | 'email';
+  };
 }
 
 export default function NuevoProspecto() {
@@ -46,7 +60,9 @@ export default function NuevoProspecto() {
   const [web, setWeb] = useState(''); // honeypot
 
   const [opcToken, setOpcToken] = useState<string | null>(null);
-  const [dup, setDup] = useState<null | 'celular' | 'dni'>(null);
+
+  // dup ahora contempla 'email'
+  const [dup, setDup] = useState<null | 'celular' | 'dni' | 'email'>(null);
 
   useEffect(() => {
     if (!router.isReady) return;
@@ -54,10 +70,17 @@ export default function NuevoProspecto() {
 
     const qsToken =
       (typeof q.t === 'string' && q.t) ||
-      (typeof q.token === 'string' && q.token) || null;
+      (typeof q.token === 'string' && q.token) ||
+      null;
 
-    if (qsToken) { localStorage.setItem('opc_token', qsToken); setOpcToken(qsToken); }
-    else { const stored = typeof window !== 'undefined' ? localStorage.getItem('opc_token') : null; setOpcToken(stored); }
+    if (qsToken) {
+      localStorage.setItem('opc_token', qsToken);
+      setOpcToken(qsToken);
+    } else {
+      const stored =
+        typeof window !== 'undefined' ? localStorage.getItem('opc_token') : null;
+      setOpcToken(stored);
+    }
 
     setUtm({
       source: (q.utm_source as string) || '',
@@ -78,21 +101,30 @@ export default function NuevoProspecto() {
 
   function normalizePhone(v: string) { return v.replace(/[^\d+()\s-]/g, ''); }
 
+  // Debounce del pre-chequeo incluye email
   const debouncedPrecheck = useMemo(
-    () => debounce(async (c: string, d: string) => {
-      const r = await apiCheckDuplicate(c || undefined, d || undefined, opcToken);
-      setDup(r.exists ? (r.match_on as 'celular' | 'dni') : null);
-    }, 450),
+    () =>
+      debounce(async (c: string, d: string, e: string) => {
+        const r = await apiCheckDuplicate(
+          c || undefined,
+          d || undefined,
+          e || undefined,
+          opcToken
+        );
+        setDup(r.exists ? (r.match_on as 'celular' | 'dni' | 'email') : null);
+      }, 450),
     [opcToken]
   );
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
-    setLoading(true); setMsg(null);
+    setLoading(true);
+    setMsg(null);
     try {
       if (!opcToken) throw new Error('No autorizado: solicita un enlace válido.');
 
-      const pre = await apiCheckDuplicate(celular, dniCe, opcToken);
+      // Pre-chequeo inmediato (en servidor) con los 3 campos
+      const pre = await apiCheckDuplicate(celular, dniCe, email, opcToken);
       if (pre.exists) { setDup(pre.match_on); setLoading(false); return; }
 
       const r = await fetch('/api/prospectos', {
@@ -111,9 +143,14 @@ export default function NuevoProspecto() {
 
       const j = (await r.json()) as { ok?: boolean; error?: string };
       if (!j.ok) {
-        if (j.error === 'DUPLICADO' || /ux_prospectos_phone_e164|ux_prospectos_dni_norm|duplicate key value/i.test(j.error || ''))
-          throw new Error('Ya existe un prospecto con el mismo celular o DNI.');
-        if (j.error === 'CHECK_VIOLATION') throw new Error('Revisa el formato de celular o DNI.');
+        // Detección de errores de unicidad para cualquiera de los 3 campos (incluye índice de email)
+        if (
+          j.error === 'DUPLICADO' ||
+          /ux_prospectos_phone_e164|ux_prospectos_dni_norm|ux_prospectos_email|duplicate key value/i.test(j.error || '')
+        ) {
+          throw new Error('Ya existe un prospecto con el mismo email, celular o DNI.');
+        }
+        if (j.error === 'CHECK_VIOLATION') throw new Error('Revisa el formato de email, celular o DNI.');
         if (j.error === 'VALIDATION') throw new Error('Revisa los campos obligatorios o formatos.');
         if (j.error === 'NO_AUTORIZADO') throw new Error('No autorizado: enlace inválido o revocado.');
         throw new Error('No se pudo registrar.');
@@ -124,7 +161,7 @@ export default function NuevoProspecto() {
       setCelular(''); setDniCe(''); setEmail('');
       setProyecto(PROYECTOS[0]); setComentario('');
       setDup(null);
-    } catch (err:any) {
+    } catch (err: any) {
       setMsg(err?.message || 'No se pudo registrar');
     } finally {
       setLoading(false);
@@ -153,65 +190,113 @@ export default function NuevoProspecto() {
 
           <div>
             <label className="label">Lugar de prospección</label>
-            <input className="input"
-                   value={lugarProspeccion}
-                   onChange={(e) => setLugarProspeccion(e.target.value)}
-                   placeholder="Ej: Jockey Plaza, Mercado Unicachi, Centro de Lima, etc." />
+            <input
+              className="input"
+              value={lugarProspeccion}
+              onChange={(e) => setLugarProspeccion(e.target.value)}
+              placeholder="Ej: Jockey Plaza, Mercado Unicachi, Centro de Lima, etc."
+            />
           </div>
 
           <div>
             <label className="label">Nombre <span className="required">*</span></label>
-            <input className="input" required
-                   value={nombre} onChange={(e) => setNombre(e.target.value)} />
+            <input
+              className="input"
+              required
+              value={nombre}
+              onChange={(e) => setNombre(e.target.value)}
+            />
           </div>
 
           <div>
             <label className="label">Apellido <span className="required">*</span></label>
-            <input className="input" required
-                   value={apellido} onChange={(e) => setApellido(e.target.value)} />
+            <input
+              className="input"
+              required
+              value={apellido}
+              onChange={(e) => setApellido(e.target.value)}
+            />
           </div>
 
           <div>
             <label className="label">Celular (Perú) <span className="required">*</span></label>
-            <input className="input"
-                   inputMode="numeric" pattern="[0-9\s+()-]*" required
-                   value={celular}
-                   onChange={(e) => { const v = normalizePhone(e.target.value); setCelular(v); debouncedPrecheck(v, dniCe); }}
-                   placeholder="9 dígitos" />
+            <input
+              className="input"
+              inputMode="numeric"
+              pattern="[0-9\s+()-]*"
+              required
+              value={celular}
+              onChange={(e) => {
+                const v = normalizePhone(e.target.value);
+                setCelular(v);
+                debouncedPrecheck(v, dniCe, email);
+              }}
+              placeholder="9 dígitos"
+            />
           </div>
 
           <div>
             <label className="label">DNI / CE</label>
-            <input className="input"
-                   value={dniCe}
-                   onChange={(e) => { const v = e.target.value.toUpperCase(); setDniCe(v); debouncedPrecheck(celular, v); }}
-                   placeholder="DNI: 8 dígitos / CE: 9-12 dígitos" />
+            <input
+              className="input"
+              value={dniCe}
+              onChange={(e) => {
+                const v = e.target.value.toUpperCase();
+                setDniCe(v);
+                debouncedPrecheck(celular, v, email);
+              }}
+              placeholder="DNI: 8 dígitos / CE: 9-12 dígitos"
+            />
           </div>
 
           <div>
             <label className="label">Correo</label>
-            <input type="email" className="input"
-                   value={email} onChange={(e) => setEmail(e.target.value)}
-                   placeholder="nombre_del_correo@dominio.com" />
+            <input
+              type="email"
+              className="input"
+              value={email}
+              onChange={(e) => {
+                const v = e.target.value.trim().toLowerCase();
+                setEmail(v);
+                debouncedPrecheck(celular, dniCe, v);
+              }}
+              placeholder="nombre_del_correo@dominio.com"
+            />
           </div>
 
           <div>
             <label className="label">Proyecto de interés</label>
-            <select className="select" value={proyecto} onChange={(e) => setProyecto(e.target.value)}>
-              {PROYECTOS.map((p) => <option key={p} value={p}>{p}</option>)}
+            <select
+              className="select"
+              value={proyecto}
+              onChange={(e) => setProyecto(e.target.value)}
+            >
+              {PROYECTOS.map((p) => (
+                <option key={p} value={p}>{p}</option>
+              ))}
             </select>
             <div className="help">Si no aplica, deja “NINGUNO”.</div>
           </div>
 
           <div>
             <label className="label">Comentario</label>
-            <textarea className="textarea" rows={3}
-                      value={comentario} onChange={(e) => setComentario(e.target.value)}
-                      placeholder="Horarios de llamada, preferencia de comunicación, etc." />
+            <textarea
+              className="textarea"
+              rows={3}
+              value={comentario}
+              onChange={(e) => setComentario(e.target.value)}
+              placeholder="Horarios de llamada, preferencia de comunicación, etc."
+            />
           </div>
 
-          {dup && <p className="alert">Ya existe un prospecto con este {dup === 'celular' ? 'celular' : 'DNI'}.</p>}
-          {msg && <p className={msg.startsWith('¡Registrado') ? 'success' : 'alert'}>{msg}</p>}
+          {dup && (
+            <p className="alert">
+              Ya existe un prospecto con este {dup === 'celular' ? 'celular' : dup === 'dni' ? 'DNI' : 'email'}.
+            </p>
+          )}
+          {msg && (
+            <p className={msg.startsWith('¡Registrado') ? 'success' : 'alert'}>{msg}</p>
+          )}
 
           <button disabled={loading || !!dup || !opcToken} className="button">
             {loading ? 'Enviando…' : 'Registrar'}
