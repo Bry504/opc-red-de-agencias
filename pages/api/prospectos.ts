@@ -27,9 +27,25 @@ function isValidEmail(v?: string) {
 
 // --- Envío a HighLevel (contacto + tags + oportunidad en PROSPECCIÓN) ---
 async function pushToHighLevel({
-  nombre, apellido, celular9, email, proyecto, opcCodigo,
+  nombre,
+  apellido,
+  celular9,
+  email,
+  proyecto,           // p.ej. "BUONAVISTA"
+  opcCodigo,          // p.ej. "OPC001"
+  lugarProspeccion,   // p.ej. "Mall del Sur"
+  dniCe,              // p.ej. "12345678"
+  comentario,         // texto largo
 }: {
-  nombre: string; apellido: string; celular9: string; email?: string | null; proyecto: string | null; opcCodigo: string;
+  nombre: string;
+  apellido: string;
+  celular9: string;
+  email?: string | null;
+  proyecto: string | null;
+  opcCodigo: string;
+  lugarProspeccion?: string | null;
+  dniCe?: string | null;
+  comentario?: string | null;
 }) {
   if (!GHL_TOKEN || !GHL_LOCATION_ID) {
     console.warn('GHL: faltan envs GHL_ACCESS_TOKEN o GHL_LOCATION_ID');
@@ -95,31 +111,39 @@ async function pushToHighLevel({
   }
   console.info('GHL upsert OK', contactId);
 
-  // 2) Tags (no bloqueante)
+  // 2) Tags EXACTOS en el contacto (sin "OPC" extra)
   try {
-    const tags: string[] = ['OPC', `OPC:${opcCodigo}`];
-    if (proyecto) tags.push(`PROY:${proyecto}`);
-    const tagRes = await fetch(`https://services.leadconnectorhq.com/contacts/${contactId}/tags`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${GHL_TOKEN}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-        Version: '2021-07-28',
-      },
-      body: JSON.stringify({ tags }),
-    });
-    if (!tagRes.ok) {
-      const tj = await tagRes.text().catch(() => '');
-      console.warn('GHL add-tags failed', tagRes.status, tj);
-    } else {
-      console.info('GHL tags OK', tags);
+    // Construye el array exacto en el orden que pediste, filtrando vacíos:
+    const tags = [
+      (opcCodigo || '').trim(),
+      (proyecto || '').trim(),
+      (lugarProspeccion || '').trim(),
+      (dniCe || '').trim(),
+    ].filter(Boolean);
+
+    if (tags.length) {
+      const tagRes = await fetch(`https://services.leadconnectorhq.com/contacts/${contactId}/tags`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${GHL_TOKEN}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          Version: '2021-07-28',
+        },
+        body: JSON.stringify({ tags }),
+      });
+      if (!tagRes.ok) {
+        const tj = await tagRes.text().catch(() => '');
+        console.warn('GHL add-tags failed', tagRes.status, tj);
+      } else {
+        console.info('GHL tags OK', tags);
+      }
     }
   } catch (e) {
     console.warn('GHL add-tags error', e);
   }
 
-  // 3) Crear Oportunidad
+  // 3) Crear Oportunidad con el nombre EXACTO requerido
   if (!GHL_PIPELINE_ID || !GHL_STAGE_ID_PROSPECCION) {
     console.warn('GHL: faltan GHL_PIPELINE_ID o GHL_STAGE_ID_PROSPECCION');
     return { ok: true, contactId };
@@ -132,7 +156,8 @@ async function pushToHighLevel({
     pipelineStageId: GHL_STAGE_ID_PROSPECCION,
     status: 'open',
     source: 'OPC',
-    name: `${nombre} ${apellido} - OPC:${opcCodigo}${proyecto ? ` - ${proyecto}` : ''}`,
+    // ← nombre como lo pediste: "Nombre Apellido - OPC"
+    name: `${nombre} ${apellido} - OPC`,
   };
   console.warn('GHL opp payload', oppPayload);
 
@@ -168,6 +193,36 @@ async function pushToHighLevel({
   const oppJson: any = await oppRes.json().catch(() => ({}));
   const opportunityId = oppJson?.id;
   console.warn('GHL opportunity OK', opportunityId);
+
+  // 4) Guardar comentario largo como NOTE (mucho mejor que tag)
+  if ((comentario && comentario.trim()) || lugarProspeccion || proyecto || dniCe) {
+    try {
+      const noteBody =
+        `Comentario OPC:\n${(comentario || '').trim()}\n\n` +
+        `Meta:\n- Código: ${opcCodigo || ''}\n- Proyecto: ${proyecto || ''}\n` +
+        `- Lugar prospección: ${lugarProspeccion || ''}\n- DNI/CE: ${dniCe || ''}`;
+
+      const noteResp = await fetch('https://services.leadconnectorhq.com/notes/', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${GHL_TOKEN}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          Version: '2021-07-28',
+          'Location-Id': GHL_LOCATION_ID,
+        },
+        body: JSON.stringify({ contactId, body: noteBody }),
+      });
+
+      if (!noteResp.ok) {
+        const noteErr = await noteResp.text().catch(() => '');
+        console.warn('Nota no creada:', noteErr);
+      }
+    } catch (e) {
+      console.warn('Error creando nota:', e);
+    }
+  }
+
   return { ok: true, contactId, opportunityId };
 }
 
@@ -279,6 +334,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         email: emailN || null,
         proyecto: proyecto_interes,
         opcCodigo: opc.codigo,
+        lugarProspeccion: lugar_prospeccion,
+        dniCe: dniN || null,
+        comentario,
       });
     } catch (e) {
       console.warn('pushToHighLevel error:', e);
