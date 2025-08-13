@@ -9,7 +9,10 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 // ===== HighLevel / LeadConnector env =====
 const GHL_TOKEN = process.env.GHL_ACCESS_TOKEN ?? '';
 const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID ?? '';
+const GHL_PIPELINE_ID = process.env.GHL_PIPELINE_ID ?? '';
+const GHL_STAGE_ID_PROSPECCION = process.env.GHL_STAGE_ID_PROSPECCION ?? '';
 
+// --- utils ---
 function cleanPhone(v: string) { return v?.replace(/\D/g, '').slice(-9); }
 function isValidDniCe(v?: string) {
   if (!v) return true;
@@ -22,7 +25,151 @@ function isValidEmail(v?: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
 }
 
-// (pushToHighLevel) — lo dejas como ya lo tienes
+// --- Envío a HighLevel (contacto + tags + oportunidad en PROSPECCIÓN) ---
+async function pushToHighLevel({
+  nombre, apellido, celular9, email, proyecto, opcCodigo,
+}: {
+  nombre: string; apellido: string; celular9: string; email?: string | null; proyecto: string | null; opcCodigo: string;
+}) {
+  if (!GHL_TOKEN || !GHL_LOCATION_ID) {
+    console.warn('GHL: faltan envs GHL_ACCESS_TOKEN o GHL_LOCATION_ID');
+    return { ok: false, skipped: true };
+  }
+
+  const phoneE164 = celular9 ? `+51${celular9}` : undefined;
+
+  // 1) Upsert Contact
+  const upsertRes = await fetch('https://services.leadconnectorhq.com/contacts/upsert', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${GHL_TOKEN}`,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      Version: '2021-07-28',
+      'Location-Id': GHL_LOCATION_ID,
+    },
+    body: JSON.stringify({
+      locationId: GHL_LOCATION_ID,
+      firstName: nombre,
+      lastName: apellido,
+      email: email || undefined,
+      phone: phoneE164,
+      source: 'OPC',
+    }),
+  });
+
+  if (!upsertRes.ok) {
+    const t = await upsertRes.text().catch(() => '');
+    console.warn('GHL upsert failed', upsertRes.status, t);
+    return { ok: false };
+  }
+
+  const upsertJson: any = await upsertRes.json().catch(() => ({}));
+  let contactId: string | undefined = upsertJson?.id || upsertJson?.contact?.id;
+
+  // Fallback: buscar por teléfono si no devuelve id
+  if (!contactId && phoneE164) {
+    try {
+      const searchRes = await fetch(
+        `https://services.leadconnectorhq.com/contacts/search?locationId=${encodeURIComponent(GHL_LOCATION_ID)}&query=${encodeURIComponent(phoneE164)}`,
+        {
+          headers: {
+            Authorization: `Bearer ${GHL_TOKEN}`,
+            Accept: 'application/json',
+            Version: '2021-07-28',
+            'Location-Id': GHL_LOCATION_ID,
+          },
+        }
+      );
+      const sjson: any = await searchRes.json().catch(() => ({}));
+      contactId = sjson?.contacts?.[0]?.id;
+      if (contactId) console.info('GHL search contactId', contactId);
+    } catch (e) {
+      console.warn('GHL search by phone failed', e);
+    }
+  }
+
+  if (!contactId) {
+    console.warn('GHL: no contactId after upsert/search', upsertJson);
+    return { ok: false };
+  }
+  console.info('GHL upsert OK', contactId);
+
+  // 2) Tags (no bloqueante)
+  try {
+    const tags: string[] = ['OPC', `OPC:${opcCodigo}`];
+    if (proyecto) tags.push(`PROY:${proyecto}`);
+    const tagRes = await fetch(`https://services.leadconnectorhq.com/contacts/${contactId}/tags`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${GHL_TOKEN}`,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        Version: '2021-07-28',
+      },
+      body: JSON.stringify({ tags }),
+    });
+    if (!tagRes.ok) {
+      const tj = await tagRes.text().catch(() => '');
+      console.warn('GHL add-tags failed', tagRes.status, tj);
+    } else {
+      console.info('GHL tags OK', tags);
+    }
+  } catch (e) {
+    console.warn('GHL add-tags error', e);
+  }
+
+  // 3) Crear Oportunidad
+  if (!GHL_PIPELINE_ID || !GHL_STAGE_ID_PROSPECCION) {
+    console.warn('GHL: faltan GHL_PIPELINE_ID o GHL_STAGE_ID_PROSPECCION');
+    return { ok: true, contactId };
+  }
+
+  const oppPayload = {
+    locationId: GHL_LOCATION_ID,
+    contactId,
+    pipelineId: GHL_PIPELINE_ID,
+    pipelineStageId: GHL_STAGE_ID_PROSPECCION,
+    status: 'open',
+    source: 'OPC',
+    name: `${nombre} ${apellido} - OPC:${opcCodigo}${proyecto ? ` - ${proyecto}` : ''}`,
+  };
+  console.warn('GHL opp payload', oppPayload);
+
+  async function postOpp(url: string) {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${GHL_TOKEN}`,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        Version: '2021-07-28',
+        'Location-Id': GHL_LOCATION_ID,
+      },
+      body: JSON.stringify(oppPayload),
+    });
+    return res;
+  }
+
+  // Intento 1
+  let oppRes = await postOpp('https://services.leadconnectorhq.com/opportunities/');
+  // Fallback a api.* si 404
+  if (oppRes.status === 404) {
+    console.warn('GHL opportunities 404 en services; reintentando en api.leadconnectorhq.com');
+    oppRes = await postOpp('https://api.leadconnectorhq.com/opportunities/');
+  }
+
+  if (!oppRes.ok) {
+    const ot = await oppRes.text().catch(() => '');
+    console.warn('GHL opportunity failed', oppRes.status, ot);
+    return { ok: true, contactId };
+  }
+
+  const oppJson: any = await oppRes.json().catch(() => ({}));
+  const opportunityId = oppJson?.id;
+  console.warn('GHL opportunity OK', opportunityId);
+  return { ok: true, contactId, opportunityId };
+}
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') return res.status(405).json({ ok: false, error: 'Method not allowed' });
@@ -112,22 +259,30 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       .single();
 
     if (error) {
-    // @ts-ignore
-    if (error.code === '23505') {
-    const m = String((error as any).message || '');
-    if (/ux_prospectos_email_norm2/i.test(m)) return res.status(200).json({ ok: false, error: 'DUPLICADO_EMAIL' });
-    // agrega aquí si luego creas índices únicos para cel o dni:
-    if (/cel|phone|ux_prospectos_cel/i.test(m)) return res.status(200).json({ ok: false, error: 'DUPLICADO_CEL' });
-    if (/dni/i.test(m)) return res.status(200).json({ ok: false, error: 'DUPLICADO_DNI' });
-    return res.status(200).json({ ok: false, error: 'DUPLICADO' });
-    }
-    // @ts-ignore
-    if (error.code === '23514') return res.status(200).json({ ok: false, error: 'CHECK_VIOLATION' });
-    return res.status(200).json({ ok: false, error: 'ERROR_DESCONOCIDO' });
+      // @ts-ignore
+      if (error.code === '23505') {
+        const m = String((error as any).message || '');
+        if (/ux_prospectos_email_norm2/i.test(m)) return res.status(200).json({ ok: false, error: 'DUPLICADO_EMAIL' });
+        return res.status(200).json({ ok: false, error: 'DUPLICADO' });
+      }
+      // @ts-ignore
+      if (error.code === '23514') return res.status(200).json({ ok: false, error: 'CHECK_VIOLATION' });
+      return res.status(200).json({ ok: false, error: 'ERROR_DESCONOCIDO' });
     }
 
-    // (pushToHighLevel) — lo dejas igual, no bloqueante
-    // await pushToHighLevel({ ... });
+    // ======= Enviar a HighLevel (NO bloqueante) =======
+    try {
+      await pushToHighLevel({
+        nombre,
+        apellido,
+        celular9: celular,
+        email: emailN || null,
+        proyecto: proyecto_interes,
+        opcCodigo: opc.codigo,
+      });
+    } catch (e) {
+      console.warn('pushToHighLevel error:', e);
+    }
 
     return res.status(200).json({ ok: true, id: data.id });
   } catch {
