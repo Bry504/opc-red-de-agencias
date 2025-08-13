@@ -16,9 +16,9 @@ export default async function handler(
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   try {
-    // --- auth por token revocable (no revelamos nada si falla) ---
-    const tokenHeader = req.headers['x-opc-token'];
-    const opcToken = typeof tokenHeader === 'string' ? tokenHeader : '';
+    // --- auth (si falla, no revelamos nada) ---
+    const h = req.headers['x-opc-token'];
+    const opcToken = typeof h === 'string' ? h : '';
     if (!opcToken) return res.status(200).json({ exists: false, match_on: null });
 
     const { data: asesor, error: errAsesor } = await supabaseAdmin
@@ -32,20 +32,17 @@ export default async function handler(
 
     // --- payload ---
     const { celular, dni, email } = (req.body ?? {}) as {
-      celular?: string;
-      dni?: string;
-      email?: string;
+      celular?: string; dni?: string; email?: string;
     };
     if (!celular && !dni && !email) {
       return res.status(200).json({ exists: false, match_on: null });
     }
 
-    // --- normalizaciones (coinciden con la lógica SQL) ---
-    const celN = (celular ?? '').replace(/\D/g, '').replace(/^51/, '').replace(/^0+/, '');
+    // --- mismas normalizaciones que el RPC/índice ---
+    const celN = (celular ?? '').replace(/\D/g,'').replace(/^51/,'').replace(/^0+/,'');
     const dniN = (dni ?? '').trim();
-    const emailN = (email ?? '').trim().toLowerCase().replace(/\s+/g, '');
+    const emailN = (email ?? '').trim().toLowerCase().replace(/\s+/g,'');
 
-    // --- usa el RPC que ya tienes en BD ---
     const { data, error } = await supabaseAdmin.rpc('prospecto_existe', {
       p_celular: celN || null,
       p_dni: dniN || null,

@@ -143,17 +143,25 @@ export default function NuevoProspecto() {
 
       const j = (await r.json()) as { ok?: boolean; error?: string };
       if (!j.ok) {
-        // Detección de errores de unicidad para cualquiera de los 3 campos (incluye índice de email)
-        if (
-          j.error === 'DUPLICADO' ||
-          /ux_prospectos_phone_e164|ux_prospectos_dni_norm|ux_prospectos_email|duplicate key value/i.test(j.error || '')
-        ) {
-          throw new Error('Ya existe un prospecto con el mismo email, celular o DNI.');
-        }
-        if (j.error === 'CHECK_VIOLATION') throw new Error('Revisa el formato de email, celular o DNI.');
-        if (j.error === 'VALIDATION') throw new Error('Revisa los campos obligatorios o formatos.');
-        if (j.error === 'NO_AUTORIZADO') throw new Error('No autorizado: enlace inválido o revocado.');
-        throw new Error('No se pudo registrar.');
+      if (j.error === 'DUPLICADO_EMAIL') {
+    setDup('email');
+    throw new Error('Ya existe un prospecto con este email.');
+      }
+      if (j.error === 'DUPLICADO_CEL') {
+    setDup('celular');
+    throw new Error('Ya existe un prospecto con este celular.');
+      }
+      if (j.error === 'DUPLICADO_DNI') {
+    setDup('dni');
+    throw new Error('Ya existe un prospecto con este DNI.');
+      }
+      if (j.error === 'DUPLICADO') {
+    throw new Error('Ya existe un prospecto con datos duplicados.');
+      }
+      if (j.error === 'CHECK_VIOLATION') throw new Error('Revisa el formato de email, celular o DNI.');
+      if (j.error === 'VALIDATION') throw new Error('Revisa los campos obligatorios o formatos.');
+      if (j.error === 'NO_AUTORIZADO') throw new Error('No autorizado: enlace inválido o revocado.');
+      throw new Error('No se pudo registrar.');
       }
 
       setMsg('¡Registrado correctamente!');
@@ -290,9 +298,9 @@ export default function NuevoProspecto() {
           </div>
 
           {dup && (
-            <p className="alert">
-              Ya existe un prospecto con este {dup === 'celular' ? 'celular' : dup === 'dni' ? 'DNI' : 'email'}.
-            </p>
+          <p className="alert">
+            Ya existe un prospecto con este {dup === 'celular' ? 'celular' : dup === 'dni' ? 'DNI' : 'email'}.
+          </p>
           )}
           {msg && (
             <p className={msg.startsWith('¡Registrado') ? 'success' : 'alert'}>{msg}</p>

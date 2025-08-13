@@ -112,16 +112,18 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       .single();
 
     if (error) {
-      // @ts-ignore
-      if (error.code === '23505') {
-        const m = String((error as any).message || '');
-        if (/ux_prospectos_email_norm2/i.test(m)) return res.status(200).json({ ok: false, error: 'DUPLICADO_EMAIL' });
-        // agrega aquí si luego creas índices para cel/dni
-        return res.status(200).json({ ok: false, error: 'DUPLICADO' });
-      }
-      // @ts-ignore
-      if (error.code === '23514') return res.status(200).json({ ok: false, error: 'CHECK_VIOLATION' });
-      return res.status(200).json({ ok: false, error: 'ERROR_DESCONOCIDO' });
+    // @ts-ignore
+    if (error.code === '23505') {
+    const m = String((error as any).message || '');
+    if (/ux_prospectos_email_norm2/i.test(m)) return res.status(200).json({ ok: false, error: 'DUPLICADO_EMAIL' });
+    // agrega aquí si luego creas índices únicos para cel o dni:
+    if (/cel|phone|ux_prospectos_cel/i.test(m)) return res.status(200).json({ ok: false, error: 'DUPLICADO_CEL' });
+    if (/dni/i.test(m)) return res.status(200).json({ ok: false, error: 'DUPLICADO_DNI' });
+    return res.status(200).json({ ok: false, error: 'DUPLICADO' });
+    }
+    // @ts-ignore
+    if (error.code === '23514') return res.status(200).json({ ok: false, error: 'CHECK_VIOLATION' });
+    return res.status(200).json({ ok: false, error: 'ERROR_DESCONOCIDO' });
     }
 
     // (pushToHighLevel) — lo dejas igual, no bloqueante
