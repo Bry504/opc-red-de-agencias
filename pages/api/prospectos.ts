@@ -25,7 +25,7 @@ function isValidEmail(v?: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
 }
 
-// --- Envío a HighLevel (contacto + tags + oportunidad en PROSPECCIÓN) ---
+// --- Envío a HighLevel (contacto + tags + oportunidad + nota) ---
 async function pushToHighLevel({
   nombre,
   apellido,
@@ -111,9 +111,8 @@ async function pushToHighLevel({
   }
   console.info('GHL upsert OK', contactId);
 
-  // 2) Tags EXACTOS en el contacto (sin "OPC" extra)
+  // 2) Tags EXACTOS en el contacto (orden: código, proyecto, lugar, DNI)
   try {
-    // Construye el array exacto en el orden que pediste, filtrando vacíos:
     const tags = [
       (opcCodigo || '').trim(),
       (proyecto || '').trim(),
@@ -156,8 +155,7 @@ async function pushToHighLevel({
     pipelineStageId: GHL_STAGE_ID_PROSPECCION,
     status: 'open',
     source: 'OPC',
-    // ← nombre como lo pediste: "Nombre Apellido - OPC"
-    name: `${nombre} ${apellido} - OPC`,
+    name: `${nombre} ${apellido} - OPC`, // ← "Nombre Apellido - OPC"
   };
   console.warn('GHL opp payload', oppPayload);
 
@@ -194,7 +192,7 @@ async function pushToHighLevel({
   const opportunityId = oppJson?.id;
   console.warn('GHL opportunity OK', opportunityId);
 
-  // 4) Guardar comentario largo como NOTE (mucho mejor que tag)
+  // 4) Guardar comentario como NOTE (endpoint correcto)
   if ((comentario && comentario.trim()) || lugarProspeccion || proyecto || dniCe) {
     try {
       const noteBody =
@@ -202,17 +200,21 @@ async function pushToHighLevel({
         `Meta:\n- Código: ${opcCodigo || ''}\n- Proyecto: ${proyecto || ''}\n` +
         `- Lugar prospección: ${lugarProspeccion || ''}\n- DNI/CE: ${dniCe || ''}`;
 
-      const noteResp = await fetch('https://services.leadconnectorhq.com/notes/', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${GHL_TOKEN}`,
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-          Version: '2021-07-28',
-          'Location-Id': GHL_LOCATION_ID,
-        },
-        body: JSON.stringify({ contactId, body: noteBody }),
-      });
+      // endpoint correcto: POST /contacts/{contactId}/notes
+      const noteResp = await fetch(
+        `https://services.leadconnectorhq.com/contacts/${contactId}/notes`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${GHL_TOKEN}`,
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            Version: '2021-07-28',
+            'Location-Id': GHL_LOCATION_ID,
+          },
+          body: JSON.stringify({ body: noteBody }), // solo 'body'
+        }
+      );
 
       if (!noteResp.ok) {
         const noteErr = await noteResp.text().catch(() => '');
