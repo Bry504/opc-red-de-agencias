@@ -2,75 +2,102 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { createClient } from '@supabase/supabase-js';
 
-// URL del proyecto (usa la pública si está definida)
 const SUPABASE_URL =
   process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.SUPABASE_URL ?? '';
-// 🔒 Service Role SOLO en el servidor
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
-
 const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-type CheckResp = { exists: boolean; match_on: null | 'celular' | 'dni' | 'email' };
+type Resp =
+  | { ok: true; data: any }
+  | { ok: false; error: 'NO_AUTORIZADO' | 'VALIDATION' | 'DUPLICADO_EMAIL' | 'DUPLICADO_CEL' | 'DUPLICADO_DNI' | 'DUPLICADO' | 'DB' | 'SERVER' };
 
-export default async function handler(
-  req: NextApiRequest,
-  res: NextApiResponse<CheckResp | { error: string }>
-) {
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+export default async function handler(req: NextApiRequest, res: NextApiResponse<Resp>) {
+  if (req.method !== 'POST') return res.status(405).json({ ok: false, error: 'DB' });
 
   try {
-    // ======= AUTORIZACIÓN OPC (token revocable) =======
+    // --- Auth por token revocable ---
     const tokenHeader = req.headers['x-opc-token'];
-    const opcToken =
-      (typeof tokenHeader === 'string' && tokenHeader) ||
-      (typeof (req.body ?? {})['opc_token'] === 'string' ? (req.body as any)['opc_token'] : '');
+    const opcToken = typeof tokenHeader === 'string' ? tokenHeader : '';
+    if (!opcToken) return res.status(200).json({ ok: false, error: 'NO_AUTORIZADO' });
 
-    // Sin token: no revelamos nada (comportarnos como "no existe")
-    if (!opcToken) return res.status(200).json({ exists: false, match_on: null });
-
-    const { data: opc, error: errAsesor } = await supabaseAdmin
+    const { data: asesor } = await supabaseAdmin
       .from('asesores')
       .select('estado')
       .eq('capture_token', opcToken)
       .single();
+    if (!asesor || !asesor.estado) return res.status(200).json({ ok: false, error: 'NO_AUTORIZADO' });
 
-    if (errAsesor || !opc || !opc.estado) {
-      // Si hay error o token inválido/inactivo, no filtramos info
-      return res.status(200).json({ exists: false, match_on: null });
+    // --- Payload y normalizaciones básicas ---
+    const b = (req.body ?? {}) as any;
+
+    const emailNorm = (b.email ?? '').trim().toLowerCase();
+    const celNorm = (b.celular ?? '').replace(/\D/g, '').replace(/^51/, '').replace(/^0+/, '');
+    const dniNorm = (b.dni_ce ?? '').trim();
+
+    // Validaciones mínimas (ajústalas si quieres)
+    if (!b.nombre || !b.apellido || !b.celular) {
+      return res.status(200).json({ ok: false, error: 'VALIDATION' });
     }
 
-    // ======= Payload =======
-    const { celular, dni, email } = (req.body ?? {}) as {
-      celular?: string;
-      dni?: string;       // <- tu frontend envía dniCe como 'dni'
-      email?: string;
-    };
-
-    // Nada que chequear
-    if (!celular && !dni && !email) {
-      return res.status(200).json({ exists: false, match_on: null });
-    }
-
-    // ======= RPC: normaliza y compara al vuelo (sin tocar tu tabla) =======
-    const { data, error } = await supabaseAdmin.rpc('prospecto_existe', {
-      p_celular: celular ?? null,
-      p_dni: dni ?? null,
-      p_email: email ?? null,
+    // --- PRECHECK usando el RPC (evita .filter con expresiones) ---
+    const { data: dup, error: rpcErr } = await supabaseAdmin.rpc('prospecto_existe', {
+      p_celular: celNorm || null,
+      p_dni: dniNorm || null,
+      p_email: emailNorm || null,
     });
 
-    if (error || !data) {
-      // No romper UX ni filtrar data sensible: asumir que no existe
-      return res.status(200).json({ exists: false, match_on: null });
+    if (!rpcErr && dup && typeof (dup as any).exists === 'boolean' && (dup as any).exists) {
+      const where = (dup as any).match_on as 'celular' | 'dni' | 'email' | null;
+      if (where === 'email') return res.status(200).json({ ok: false, error: 'DUPLICADO_EMAIL' });
+      if (where === 'celular') return res.status(200).json({ ok: false, error: 'DUPLICADO_CEL' });
+      if (where === 'dni') return res.status(200).json({ ok: false, error: 'DUPLICADO_DNI' });
+      return res.status(200).json({ ok: false, error: 'DUPLICADO' });
     }
 
-    // data es el JSONB devuelto por la función
-    // Aseguramos typings mínimamente
-    const exists = typeof (data as any).exists === 'boolean' ? (data as any).exists : false;
-    const match_on = ((data as any).match_on ?? null) as CheckResp['match_on'];
+    // --- INSERT (email guardado normalizado) ---
+    const { data, error } = await supabaseAdmin
+      .from('prospectos')
+      .insert([{
+        lugar_prospeccion: b.lugar_prospeccion ?? null,
+        nombre: (b.nombre ?? '').trim(),
+        apellido: (b.apellido ?? '').trim(),
+        celular: b.celular ?? null,        // se guarda tal cual ingresó
+        dni_ce: dniNorm || null,
+        email: emailNorm || null,          // normalizado
+        proyecto_interes: b.proyecto_interes ?? null,
+        comentario: b.comentario ?? null,
+        utm_source: b.utm_source ?? null,
+        utm_medium: b.utm_medium ?? null,
+        utm_campaign: b.utm_campaign ?? null,
+        lat: b.lat ?? null,
+        lon: b.lon ?? null,
+        asesor_codigo: b.asesor_codigo ?? 'OPC001',
+        source: b.source ?? 'OPC',
+      }])
+      .select()
+      .single();
 
-    return res.status(200).json({ exists, match_on });
-  } catch {
-    // Falla silenciosa: no bloquear por error de red/RPC
-    return res.status(200).json({ exists: false, match_on: null });
+    if (error) {
+      // Si hay índice único por email normalizado:
+      if ((error as any).code === '23505') {
+        const msg = String((error as any).message || '');
+        if (/ux_prospectos_email_norm2/i.test(msg)) {
+          return res.status(200).json({ ok: false, error: 'DUPLICADO_EMAIL' });
+        }
+        // por si luego agregas índices únicos para cel/dni:
+        if (/cel|phone|ux_prospectos_cel/i.test(msg)) {
+          return res.status(200).json({ ok: false, error: 'DUPLICADO_CEL' });
+        }
+        if (/dni/i.test(msg)) {
+          return res.status(200).json({ ok: false, error: 'DUPLICADO_DNI' });
+        }
+        return res.status(200).json({ ok: false, error: 'DUPLICADO' });
+      }
+      return res.status(200).json({ ok: false, error: 'DB' });
+    }
+
+    return res.status(200).json({ ok: true, data });
+  } catch (e) {
+    return res.status(200).json({ ok: false, error: 'SERVER' });
   }
 }
