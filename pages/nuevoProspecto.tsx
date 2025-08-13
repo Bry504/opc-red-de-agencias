@@ -13,7 +13,7 @@ const PROYECTOS = [
   'ALTAVISTA'
 ];
 
-// Debounce
+// Debounce helper
 const debounce = (fn: Function, ms = 400) => {
   let t: any;
   return (...args: any[]) => {
@@ -22,7 +22,7 @@ const debounce = (fn: Function, ms = 400) => {
   };
 };
 
-// Pre-check con token (ahora incluye email)
+// --- Pre-check con token (incluye email)
 async function apiCheckDuplicate(
   celular?: string,
   dni?: string,
@@ -61,7 +61,7 @@ export default function NuevoProspecto() {
 
   const [opcToken, setOpcToken] = useState<string | null>(null);
 
-  // dup ahora contempla 'email'
+  // dup contempla 'email' | 'celular' | 'dni'
   const [dup, setDup] = useState<null | 'celular' | 'dni' | 'email'>(null);
 
   useEffect(() => {
@@ -99,9 +99,11 @@ export default function NuevoProspecto() {
     );
   }, []);
 
-  function normalizePhone(v: string) { return v.replace(/[^\d+()\s-]/g, ''); }
+  function normalizePhoneInput(v: string) {
+    return v.replace(/[^\d+()\s-]/g, '');
+  }
 
-  // Debounce del pre-chequeo incluye email
+  // --- Debounce del pre‑chequeo
   const debouncedPrecheck = useMemo(
     () =>
       debounce(async (c: string, d: string, e: string) => {
@@ -116,6 +118,17 @@ export default function NuevoProspecto() {
     [opcToken]
   );
 
+  // --- Chequeo inmediato (onBlur o cuando quieras forzar)
+  const runPre = async (c?: string, d?: string, e?: string) => {
+    const r = await apiCheckDuplicate(
+      (c ?? celular) || undefined,
+      (d ?? dniCe) || undefined,
+      (e ?? email) || undefined,
+      opcToken
+    );
+    setDup(r.exists ? (r.match_on as 'celular' | 'dni' | 'email') : null);
+  };
+
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
@@ -123,7 +136,7 @@ export default function NuevoProspecto() {
     try {
       if (!opcToken) throw new Error('No autorizado: solicita un enlace válido.');
 
-      // Pre-chequeo inmediato (en servidor) con los 3 campos
+      // Pre‑chequeo inmediato antes de enviar
       const pre = await apiCheckDuplicate(celular, dniCe, email, opcToken);
       if (pre.exists) { setDup(pre.match_on); setLoading(false); return; }
 
@@ -132,7 +145,10 @@ export default function NuevoProspecto() {
         headers: { 'Content-Type': 'application/json', 'x-opc-token': opcToken || '' },
         body: JSON.stringify({
           lugar_prospeccion: lugarProspeccion,
-          nombre, apellido, celular, dni_ce: dniCe, email,
+          nombre, apellido,
+          celular,                       // lo mismo que ves en el input
+          dni_ce: dniCe,
+          email,                         // normalizado en el backend también
           proyecto_interes: proyecto === 'NINGUNO' ? null : proyecto,
           comentario,
           utm_source: utm.source, utm_medium: utm.medium, utm_campaign: utm.campaign,
@@ -143,25 +159,25 @@ export default function NuevoProspecto() {
 
       const j = (await r.json()) as { ok?: boolean; error?: string };
       if (!j.ok) {
-      if (j.error === 'DUPLICADO_EMAIL') {
-    setDup('email');
-    throw new Error('Ya existe un prospecto con este email.');
-      }
-      if (j.error === 'DUPLICADO_CEL') {
-    setDup('celular');
-    throw new Error('Ya existe un prospecto con este celular.');
-      }
-      if (j.error === 'DUPLICADO_DNI') {
-    setDup('dni');
-    throw new Error('Ya existe un prospecto con este DNI.');
-      }
-      if (j.error === 'DUPLICADO') {
-    throw new Error('Ya existe un prospecto con datos duplicados.');
-      }
-      if (j.error === 'CHECK_VIOLATION') throw new Error('Revisa el formato de email, celular o DNI.');
-      if (j.error === 'VALIDATION') throw new Error('Revisa los campos obligatorios o formatos.');
-      if (j.error === 'NO_AUTORIZADO') throw new Error('No autorizado: enlace inválido o revocado.');
-      throw new Error('No se pudo registrar.');
+        if (j.error === 'DUPLICADO_EMAIL') {
+          setDup('email');
+          throw new Error('Ya existe un prospecto con este email.');
+        }
+        if (j.error === 'DUPLICADO_CEL') {
+          setDup('celular');
+          throw new Error('Ya existe un prospecto con este celular.');
+        }
+        if (j.error === 'DUPLICADO_DNI') {
+          setDup('dni');
+          throw new Error('Ya existe un prospecto con este DNI.');
+        }
+        if (j.error === 'DUPLICADO') {
+          throw new Error('Ya existe un prospecto con datos duplicados.');
+        }
+        if (j.error === 'CHECK_VIOLATION') throw new Error('Revisa el formato de email, celular o DNI.');
+        if (j.error === 'VALIDATION') throw new Error('Revisa los campos obligatorios o formatos.');
+        if (j.error === 'NO_AUTORIZADO') throw new Error('No autorizado: enlace inválido o revocado.');
+        throw new Error('No se pudo registrar.');
       }
 
       setMsg('¡Registrado correctamente!');
@@ -235,9 +251,13 @@ export default function NuevoProspecto() {
               required
               value={celular}
               onChange={(e) => {
-                const v = normalizePhone(e.target.value);
+                const v = normalizePhoneInput(e.target.value);
                 setCelular(v);
                 debouncedPrecheck(v, dniCe, email);
+              }}
+              onBlur={(e) => {
+                const v = normalizePhoneInput(e.target.value);
+                runPre(v, dniCe, email);
               }}
               placeholder="9 dígitos"
             />
@@ -253,6 +273,10 @@ export default function NuevoProspecto() {
                 setDniCe(v);
                 debouncedPrecheck(celular, v, email);
               }}
+              onBlur={(e) => {
+                const v = e.target.value.toUpperCase();
+                runPre(celular, v, email);
+              }}
               placeholder="DNI: 8 dígitos / CE: 9-12 dígitos"
             />
           </div>
@@ -264,9 +288,13 @@ export default function NuevoProspecto() {
               className="input"
               value={email}
               onChange={(e) => {
-                const v = e.target.value.trim().toLowerCase();
+                const v = e.target.value.trim().toLowerCase().replace(/\s+/g, '');
                 setEmail(v);
                 debouncedPrecheck(celular, dniCe, v);
+              }}
+              onBlur={(e) => {
+                const v = e.target.value.trim().toLowerCase().replace(/\s+/g, '');
+                runPre(celular, dniCe, v);
               }}
               placeholder="nombre_del_correo@dominio.com"
             />
@@ -298,9 +326,9 @@ export default function NuevoProspecto() {
           </div>
 
           {dup && (
-          <p className="alert">
-            Ya existe un prospecto con este {dup === 'celular' ? 'celular' : dup === 'dni' ? 'DNI' : 'email'}.
-          </p>
+            <p className="alert">
+              Ya existe un prospecto con este {dup === 'celular' ? 'celular' : dup === 'dni' ? 'DNI' : 'email'}.
+            </p>
           )}
           {msg && (
             <p className={msg.startsWith('¡Registrado') ? 'success' : 'alert'}>{msg}</p>
