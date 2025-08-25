@@ -34,6 +34,7 @@ function isValidEmail(v?: string) {
   if (!v) return true;
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
 }
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms)); // <<<
 
 // --- Envío a HighLevel (contacto + tags + oportunidad + nota) ---
 async function pushToHighLevel({
@@ -81,7 +82,7 @@ async function pushToHighLevel({
       try {
         const r = await fetch(url, { headers: baseHeaders });
         if (r.ok) return await r.json().catch(() => ({}));
-      } catch (_) {/* try next */}
+      } catch (_) {/* try next */ }
     }
     return null;
   }
@@ -193,6 +194,22 @@ async function pushToHighLevel({
         detail?.data?.assignedUserId ||
         assignedUserId;
     }
+
+    // <<< reintentos cortos por si la asignación tarda unos segundos
+    if (!assignedUserId) {
+      for (const delay of [400, 800]) {
+        await sleep(delay);
+        const d = await fetchOppById(opportunityId);
+        const userId =
+          d?.assignedUserId ||
+          d?.assignedTo?.id ||
+          d?.userId ||
+          d?.opportunity?.assignedTo?.id ||
+          d?.data?.assignedUserId;
+        if (userId) { assignedUserId = String(userId); break; }
+      }
+    }
+    // >>>
   }
 
   // ---------- 4) Nota opcional ----------
@@ -355,6 +372,27 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         source: 'SYSTEM',
       });
       // -----------------------------------------------------------
+
+      // <<< Completar por si ya tenemos asesor_id y la fila quedó sin él
+      if (patch.asesor_id) {
+        const { data: latestSystem } = await supabase
+          .from('prospecto_stage_history')
+          .select('id, asesor_id')
+          .eq('prospecto_id', data.id)
+          .eq('to_stage', 'PROSPECCION')
+          .eq('source', 'SYSTEM')
+          .order('changed_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (latestSystem?.id && !latestSystem.asesor_id) {
+          await supabase
+            .from('prospecto_stage_history')
+            .update({ asesor_id: patch.asesor_id })
+            .eq('id', latestSystem.id);
+        }
+      }
+      // >>>
 
     } catch (e) {
       console.warn('pushToHighLevel error:', e);

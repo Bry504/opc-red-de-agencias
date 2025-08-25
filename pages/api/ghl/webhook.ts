@@ -7,16 +7,11 @@ const SUPABASE_URL =
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-const GHL_LOCATION_ID  = process.env.GHL_LOCATION_ID ?? '';
 const GHL_ACCESS_TOKEN = process.env.GHL_ACCESS_TOKEN ?? process.env.GHL_TOKEN ?? '';
 
-function norm(s?: string | null) {
-  return (s ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
-}
-
-function pick(body: any, ...keys: string[]) {
+function pick(obj: any, ...keys: string[]) {
   for (const k of keys) {
-    const v = body?.[k];
+    const v = obj?.[k];
     if (v != null) return v;
   }
   return null;
@@ -56,7 +51,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     // 1) localizar prospecto
     const { data: p } = await supabase
       .from('prospectos')
-      .select('id, asesor_id, etapa_actual, stage_changed_at')
+      .select('id, asesor_id, etapa_actual')
       .eq('hl_opportunity_id', opportunityId)
       .maybeSingle();
 
@@ -77,7 +72,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(200).json({ ok: true, skip: 'ASESOR_NOT_FOUND', assignedUserId });
     }
 
-    // 3) actualizar el dueño en prospectos si cambió
+    // 3) actualizar dueño en prospectos si cambió
     if (a.id !== p.asesor_id) {
       await supabase
         .from('prospectos')
@@ -85,23 +80,26 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         .eq('id', p.id);
     }
 
-    // 4) completar/actualizar la fila inicial del history (si existe y es reciente)
-    const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    // 4) completar history: buscamos la última fila de la etapa actual para este prospecto
+    //    (hasta 30min atrás para tolerar retrasos). Si existe y sin asesor -> la completamos.
+    //    Si no existe, insertamos una sola fila de ASSIGN.
+    const thirtyMinAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
 
     const { data: recent } = await supabase
       .from('prospecto_stage_history')
-      .select('id, to_stage, from_stage, asesor_id, source, changed_at')
+      .select('id, to_stage, asesor_id, changed_at, source')
       .eq('prospecto_id', p.id)
-      .gte('changed_at', fiveMinAgo)
+      .eq('to_stage', p.etapa_actual ?? 'PROSPECCION')
+      .gte('changed_at', thirtyMinAgo)
       .order('changed_at', { ascending: false })
       .limit(1)
       .maybeSingle();
 
-    if (recent && recent.to_stage === p.etapa_actual) {
+    if (recent) {
       if (!recent.asesor_id) {
         await supabase
           .from('prospecto_stage_history')
-          .update({ asesor_id: a.id, source: 'ASSIGN' })
+          .update({ asesor_id: a.id, source: recent.source ?? 'ASSIGN' })
           .eq('id', recent.id);
       }
       return res.status(200).json({
@@ -112,7 +110,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       });
     }
 
-    // 5) si no hubo fila reciente, insertamos una de "asignación" sobre la etapa actual
+    // Último recurso: si no hay fila reciente, generamos 1 de ASSIGN (sin cambiar etapa)
     await supabase.from('prospecto_stage_history').insert([{
       prospecto_id: p.id,
       hl_opportunity_id: opportunityId,
