@@ -16,17 +16,18 @@ export default async function handler(
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   try {
-    // --- auth (si falla, no revelamos nada) ---
+    // --- auth (silenciosa) ---
     const h = req.headers['x-opc-token'];
     const opcToken = typeof h === 'string' ? h : '';
     if (!opcToken) return res.status(200).json({ exists: false, match_on: null });
 
-    const { data: asesor, error: errAsesor } = await supabaseAdmin
-      .from('asesores')
+    const { data: opc, error: errOpc } = await supabaseAdmin
+      .from('ops')
       .select('estado')
       .eq('capture_token', opcToken)
       .single();
-    if (errAsesor || !asesor || !asesor.estado) {
+
+    if (errOpc || !opc || !opc.estado) {
       return res.status(200).json({ exists: false, match_on: null });
     }
 
@@ -38,8 +39,8 @@ export default async function handler(
       return res.status(200).json({ exists: false, match_on: null });
     }
 
-    // --- mismas normalizaciones que el RPC/índice ---
-    const celN = (celular ?? '').replace(/\D/g,'').replace(/^51/,'').replace(/^0+/,'');
+    // --- normalizaciones (igual que en el RPC) ---
+    const celN = (celular ?? '').replace(/\D/g,'').replace(/^51/,'').replace(/^0+/, '');
     const dniN = (dni ?? '').trim();
     const emailN = (email ?? '').trim().toLowerCase().replace(/\s+/g,'');
 

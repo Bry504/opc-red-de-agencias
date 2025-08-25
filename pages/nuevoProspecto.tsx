@@ -55,7 +55,6 @@ export default function NuevoProspecto() {
   const [proyecto, setProyecto] = useState(PROYECTOS[0]);
   const [comentario, setComentario] = useState('');
 
-  const [utm, setUtm] = useState({ source: '', medium: '', campaign: '' });
   const [geo, setGeo] = useState<{ lat?: number; lon?: number }>({});
   const [web, setWeb] = useState(''); // honeypot
 
@@ -81,12 +80,6 @@ export default function NuevoProspecto() {
         typeof window !== 'undefined' ? localStorage.getItem('opc_token') : null;
       setOpcToken(stored);
     }
-
-    setUtm({
-      source: (q.utm_source as string) || '',
-      medium: (q.utm_medium as string) || '',
-      campaign: (q.utm_campaign as string) || ''
-    });
   }, [router.isReady, router.query]);
 
   // Geo (si no quieres permiso, elimina esto)
@@ -151,7 +144,6 @@ export default function NuevoProspecto() {
           email,                         // normalizado en el backend también
           proyecto_interes: proyecto === 'NINGUNO' ? null : proyecto,
           comentario,
-          utm_source: utm.source, utm_medium: utm.medium, utm_campaign: utm.campaign,
           lat: geo.lat, lon: geo.lon,
           web
         })

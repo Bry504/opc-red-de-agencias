@@ -2,6 +2,13 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { createClient } from '@supabase/supabase-js';
 
+type PushResult = {
+  ok: boolean;
+  contactId?: string;
+  opportunityId?: string;
+  skipped?: boolean;
+};
+
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.SUPABASE_URL ?? '';
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
@@ -163,9 +170,9 @@ async function pushToHighLevel({
     pipelineStageId: GHL_STAGE_ID_PROSPECCION,
     status: 'open',
     source: 'OPC',
-    name: `${nombre} ${apellido} - OPC`,
+    name: `${nombre} ${apellido}`,
   };
-  console.warn('GHL opp payload', oppPayload);
+  console.warn('GHL opp payload', oppPayload); // ESTO PODEMOS OBVIARLO 24/08/2025
 
   async function postOpp(url: string) {
     const res = await fetch(url, {
@@ -247,7 +254,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     if (!opcToken) return res.status(200).json({ ok: false, error: 'NO_AUTORIZADO' });
 
     const { data: opc, error: opcErr } = await supabase
-      .from('asesores')
+      .from('opcs')
       .select('id,codigo,estado')
       .eq('capture_token', opcToken)
       .single();
@@ -265,11 +272,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const proyectoRaw       = (body['proyecto_interes'] as string) ?? null;
     const proyecto_interes  = proyectoRaw === 'NINGUNO' ? null : proyectoRaw;
     const comentario        = (body['comentario'] as string) ?? null;
-    const utm_source        = (body['utm_source'] as string) ?? null;
-    const utm_medium        = (body['utm_medium'] as string) ?? null;
-    const utm_campaign      = (body['utm_campaign'] as string) ?? null;
     const lat               = (body['lat'] as number | undefined) ?? null;
-    const lon               = (body['lon'] as number | undefined) ?? null;
+    const longVal           = (body['lon'] as number | undefined) ?? null;
 
     // --- validaciones mínimas ---
     if (!nombre.trim() || !apellido.trim()) return res.status(200).json({ ok: false, error: 'VALIDATION' });
@@ -300,7 +304,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const ip = (typeof ipHeader === 'string' && ipHeader)
       ? ipHeader.split(',')[0].trim()
       : req.socket.remoteAddress || null;
-    const ua = req.headers['user-agent'] || null;
 
     const { data, error } = await supabase
       .from('prospectos')
@@ -313,10 +316,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         email: emailN || null,               // normalizado al guardar
         proyecto_interes,
         comentario,
-        asesor_codigo: opc.codigo,
-        utm_source, utm_medium, utm_campaign,
-        lat, lon,
-        user_agent: ua,
+        lat,
+        long: longVal,                       // << importante: columna se llama "long"
+        opc_id: opc.id,                      // << FK al captador
+        etapa_actual: 'PROSPECCION',
+        stage_changed_at: new Date().toISOString(),
         ip_insercion: ip
       }])
       .select('id')
@@ -336,20 +340,35 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     // ======= Enviar a HighLevel (NO bloqueante) =======
     try {
-      await pushToHighLevel({
-        nombre,
-        apellido,
-        celular9: celular,
-        email: emailN || null,
-        proyecto: proyecto_interes,
-        opcCodigo: opc.codigo,
-        lugarProspeccion: lugar_prospeccion,
-        dniCe: dniN || null,
-        comentario,
-      });
-    } catch (e) {
-      console.warn('pushToHighLevel error:', e);
+  const r: PushResult = await pushToHighLevel({
+    nombre,
+    apellido,
+    celular9: celular,
+    email: emailN || null,
+    proyecto: proyecto_interes,
+    opcCodigo: opc.codigo,
+    lugarProspeccion: lugar_prospeccion,
+    dniCe: dniN || null,
+    comentario,
+  });
+
+  // Si HighLevel devolvió el ID de la oportunidad, guárdalo en la fila creada
+  if (r?.opportunityId) {
+    const { error: upErr } = await supabase
+      .from('prospectos')
+      .update({
+        hl_opportunity_id: r.opportunityId,
+        hl_pipeline_id: GHL_PIPELINE_ID || null,
+      })
+      .eq('id', data.id);
+
+    if (upErr) {
+      console.warn('No pude guardar IDs de HighLevel en prospectos:', upErr);
     }
+  }
+} catch (e) {
+  console.warn('pushToHighLevel error:', e);
+}
 
     return res.status(200).json({ ok: true, id: data.id });
   } catch {
