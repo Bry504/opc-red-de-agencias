@@ -7,43 +7,67 @@ const SUPABASE_URL =
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-// HL envs
 const GHL_LOCATION_ID  = process.env.GHL_LOCATION_ID ?? '';
 const GHL_ACCESS_TOKEN = process.env.GHL_ACCESS_TOKEN ?? process.env.GHL_TOKEN ?? '';
 
-// -------- helpers HL ----------
-async function fetchOpportunityFromHL(opportunityId: string) {
-  if (!GHL_ACCESS_TOKEN || !GHL_LOCATION_ID) return null;
+type HLFetchResult = {
+  ok: boolean;
+  json?: any;
+  status?: number;
+  textStart?: string | null;
+};
 
-  const headers: Record<string, string> = {
+async function fetchHL(url: string, headers: Record<string,string>): Promise<HLFetchResult> {
+  try {
+    const r = await fetch(url, { headers });
+    if (r.ok) {
+      const j = await r.json().catch(() => null);
+      return { ok: true, json: j, status: r.status, textStart: null };
+    } else {
+      const t = await r.text().catch(() => '');
+      return { ok: false, status: r.status, textStart: t?.slice(0, 200) ?? null };
+    }
+  } catch {
+    return { ok: false, status: undefined, textStart: null };
+  }
+}
+
+async function fetchOpportunityFromHL(opportunityId: string): Promise<HLFetchResult> {
+  if (!GHL_ACCESS_TOKEN) return { ok: false };
+
+  const baseHeaders: Record<string, string> = {
     Authorization: `Bearer ${GHL_ACCESS_TOKEN}`,
     Accept: 'application/json',
     'Content-Type': 'application/json',
     Version: '2021-07-28',
-    'Location-Id': GHL_LOCATION_ID,
   };
+  const withLocation = GHL_LOCATION_ID
+    ? { ...baseHeaders, 'Location-Id': GHL_LOCATION_ID }
+    : baseHeaders;
 
   const urls = [
     `https://services.leadconnectorhq.com/opportunities/${encodeURIComponent(opportunityId)}`,
     `https://api.leadconnectorhq.com/opportunities/${encodeURIComponent(opportunityId)}`,
   ];
 
-  for (const url of urls) {
-    try {
-      const r = await fetch(url, { headers });
-      if (r.ok) {
-        const j = await r.json().catch(() => null);
-        if (j) return j;
-      }
-    } catch (e) {
-      // try next url
-    }
+  // 1) intenta con Location-Id (si lo hay)
+  for (const u of urls) {
+    const r = await fetchHL(u, withLocation);
+    if (r.ok) return r;
+    // guarda el último y sigue intentos
+    var last = r;
   }
-  return null;
+
+  // 2) reintento SIN Location-Id (algunas cuentas lo prefieren/lo rechazan)
+  for (const u of urls) {
+    const r = await fetchHL(u, baseHeaders);
+    if (r.ok) return r;
+    last = r;
+  }
+  return last ?? { ok: false };
 }
 
 function extractAssignedUserId(obj: any): string | null {
-  // Intenta todas las variantes conocidas
   const cands = [
     obj?.assignedUserId,
     obj?.userId,
@@ -54,10 +78,8 @@ function extractAssignedUserId(obj: any): string | null {
     obj?.data?.assignedUserId,
     obj?.result?.assignedUserId,
   ].filter(Boolean);
-
   return cands.length ? String(cands[0]) : null;
 }
-
 function pick(body: any, ...keys: string[]) {
   for (const k of keys) {
     const v = body?.[k];
@@ -66,9 +88,7 @@ function pick(body: any, ...keys: string[]) {
   return null;
 }
 
-// -------------------------------
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  // health
   if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') {
     return res.status(200).json({ ok: true });
   }
@@ -83,31 +103,32 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const body: any = req.body || {};
     const opp = body.opportunity ?? body.payload?.opportunity ?? body;
 
-    // 1) OpportunityId
     const opportunityId: string | undefined =
-      pick(body, 'opportunityId') ??
-      opp?.id ??
-      undefined;
+      pick(body, 'opportunityId') ?? opp?.id ?? undefined;
 
     if (!opportunityId) {
       const out = { ok: true, skip: 'NO_OPPORTUNITY_ID' as const };
       return res.status(200).json(debug ? { ...out, body } : out);
     }
 
-    // 2) AssignedUserId (payload primero)
+    // 1) del payload
     let assignedUserId =
       pick(body, 'assignedUserId', 'userId') ??
       extractAssignedUserId(opp);
 
-    // 3) Si no vino, intenta leer desde HL con token+location
     let hlFetchTried = false;
     let hlFetchOk = false;
-    let hlRaw: any = null;
-    if (!assignedUserId && GHL_ACCESS_TOKEN && GHL_LOCATION_ID) {
+    let hlStatus: number | undefined = undefined;
+    let hlTextStart: string | null | undefined = undefined;
+
+    // 2) si no vino, consulta HL
+    if (!assignedUserId) {
       hlFetchTried = true;
-      hlRaw = await fetchOpportunityFromHL(opportunityId);
-      if (hlRaw) {
-        assignedUserId = extractAssignedUserId(hlRaw);
+      const r = await fetchOpportunityFromHL(opportunityId);
+      hlStatus = r.status;
+      hlTextStart = r.textStart;
+      if (r.ok && r.json) {
+        assignedUserId = extractAssignedUserId(r.json);
         hlFetchOk = Boolean(assignedUserId);
       }
     }
@@ -118,29 +139,29 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         skip: 'NO_ASSIGNED_USER' as const,
         debug: debug ? {
           env: { hasToken: !!GHL_ACCESS_TOKEN, hasLocation: !!GHL_LOCATION_ID },
-          hlFetchTried, hlFetchOk, hlSample: hlRaw?.opportunity ? 'opportunity-present' : (hlRaw ? 'some-json' : 'null'),
+          hlFetchTried, hlFetchOk, hlStatus, hlTextStart,
         } : undefined,
       };
       return res.status(200).json(out);
     }
 
-    // 4) Busca el prospecto por hl_opportunity_id
-    const { data: prospect, error: eProspect } = await supabase
+    // 3) busca prospecto
+    const { data: prospect, error: ePros } = await supabase
       .from('prospectos')
       .select('id, asesor_id, hl_opportunity_id')
       .eq('hl_opportunity_id', opportunityId)
       .maybeSingle();
 
-    if (eProspect) {
+    if (ePros) {
       const out = { ok: true, skip: 'SELECT_ERROR' as const };
-      return res.status(200).json(debug ? { ...out, eProspect } : out);
+      return res.status(200).json(debug ? { ...out, ePros } : out);
     }
     if (!prospect) {
       const out = { ok: true, skip: 'PROSPECT_NOT_FOUND' as const, opportunityId };
       return res.status(200).json(out);
     }
 
-    // 5) Mapea HL user -> asesores.id
+    // 4) mapea HL user -> asesores.id
     const { data: asesor } = await supabase
       .from('asesores')
       .select('id')
@@ -152,7 +173,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(200).json(out);
     }
 
-    // 6) Actualiza prospecto si cambió
+    // 5) actualiza prospecto si cambió
     let updatedProspect = false;
     if (asesor.id !== prospect.asesor_id) {
       const { error: upErr } = await supabase
@@ -162,15 +183,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       updatedProspect = !upErr;
     }
 
-    const out = {
+    return res.status(200).json({
       ok: true,
       opportunityId,
       assignedUserId,
       asesorId: asesor.id,
       updatedProspect,
-      foundBy: 'opportunity',
-    };
-    return res.status(200).json(out);
+      foundBy: 'payload_or_hl',
+    });
   } catch (e: any) {
     return res.status(200).json({ ok: true, handled: false, error: e?.message || String(e) });
   }
