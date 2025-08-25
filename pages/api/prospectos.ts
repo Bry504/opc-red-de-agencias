@@ -317,7 +317,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(200).json({ ok: false, error: 'ERROR_DESCONOCIDO' });
     }
 
-    // ======= Enviar a HighLevel (NO bloqueante) =======
+// ======= Enviar a HighLevel (NO bloqueante) =======
 try {
   const r = await pushToHighLevel({
     nombre,
@@ -331,24 +331,21 @@ try {
     comentario,
   });
 
-    // <<< NUEVO: guardar IDs de HL en la fila del prospecto >>>
+  // <<< NUEVO: guardar IDs de HL en la fila del prospecto >>>
   if (r?.opportunityId) {
     await supabase
       .from('prospectos')
       .update({
         hl_opportunity_id: r.opportunityId,
-        hl_pipeline_id: GHL_PIPELINE_ID || null, // o el nombre si prefieres
+        hl_pipeline_id: GHL_PIPELINE_ID || null, // opcional
       })
       .eq('id', data.id);
   }
-  // <<< FIN NUEVO >>>
-
-  // Construir patch con lo que venga de HL
+  // Construir patch con lo que venga de HL (asesor, pipeline)
   const patch: any = {};
   if (r?.opportunityId) patch.hl_opportunity_id = r.opportunityId;
   if (r?.pipelineId)    patch.hl_pipeline_id   = String(r.pipelineId);
 
-  // Si HL reportó el usuario asignado, lo mapeamos a asesores.id (por hl_user_id)
   if (r?.assignedUserId) {
     const { data: a } = await supabase
       .from('asesores')
@@ -357,16 +354,26 @@ try {
       .maybeSingle();
     if (a?.id) patch.asesor_id = a.id;
   }
-
   if (Object.keys(patch).length) {
     await supabase.from('prospectos').update(patch).eq('id', data.id);
   }
+
+  // <<< NUEVO: ESCRIBIR HISTORIAL SOLO DE ETAPAS >>>
+  // Primer registro del historial: NULL -> PROSPECCION (source=SYSTEM)
+  await supabase.from('prospecto_stage_history').insert({
+    prospecto_id: data.id,
+    hl_opportunity_id: r?.opportunityId ?? null,
+    from_stage: null,
+    to_stage: 'PROSPECCION',
+    changed_at: new Date().toISOString(),
+    asesor_id: patch.asesor_id ?? null,
+    source: 'SYSTEM',
+  });
+  // <<< FIN NUEVO >>>
+
 } catch (e) {
   console.warn('pushToHighLevel error:', e);
 }
 
-    return res.status(200).json({ ok: true, id: data.id });
-  } catch {
-    return res.status(200).json({ ok: false, error: 'ERROR_DESCONOCIDO' });
-  }
+return res.status(200).json({ ok: true, id: data.id });
 }
