@@ -7,231 +7,130 @@ const SUPABASE_URL =
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID ?? '';
-
-/* ---------------- helpers ---------------- */
+const GHL_LOCATION_ID  = process.env.GHL_LOCATION_ID ?? '';
 
 function norm(s?: string | null) {
-  return (s ?? '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLowerCase();
+  return (s ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
 }
-
-/** Soporta rutas con puntos, p.ej. "customData.stageName" */
-function pick(obj: any, ...keys: string[]) {
-  for (const k of keys) {
-    if (!obj) break;
-    if (k.includes('.')) {
-      const parts = k.split('.');
-      let cur: any = obj;
-      let ok = true;
-      for (const p of parts) {
-        if (cur && p in cur) cur = cur[p];
-        else {
-          ok = false;
-          break;
-        }
-      }
-      if (ok && cur != null) return cur;
-    } else if (obj?.[k] != null) {
-      return obj[k];
-    }
-  }
-  return null;
-}
-
-/** Devuelve {stage, etapas} de pipeline_stages a partir del nombre mostrado en HL */
-async function resolveStageByName(stageNameRaw: string) {
-  const nameN = norm(stageNameRaw);
-
-  const { data: all, error } = await supabase
-    .from('pipeline_stages')
-    .select('stage, etapas');
-
-  if (error || !all) return null;
-
-  // 1) coincide por 'etapas' (texto humano)
-  let hit = all.find((r) => norm(r.etapas) === nameN);
-  if (hit) return hit;
-
-  // 2) coincide por 'stage' (código)
-  hit = all.find((r) => norm(r.stage) === nameN);
-  if (hit) return hit;
-
-  // 3) intento extra: reemplaza espacios por _
-  const asCode = nameN.replace(/\s+/g, '_');
-  hit = all.find((r) => norm(r.stage) === asCode);
-  if (hit) return hit;
-
-  return null;
-}
-
-function extractAssignedUserId(body: any, opp: any): string | null {
-  const cands = [
-    pick(body, 'assignedUserId', 'userId', 'assigned_to.id', 'assignedTo.id'),
-    pick(body, 'customData.assignedUserId'),
-    pick(opp, 'assignedUserId', 'userId', 'assigned_to.id', 'assignedTo.id'),
-  ].filter(Boolean) as string[];
-  return cands.length ? String(cands[0]) : null;
-}
-
-/* --------------- handler ------------------ */
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method || '')) {
-    res.setHeader('Allow', 'POST,GET,HEAD,OPTIONS');
-    return res.status(200).json({ ok: true });
-  }
   if (req.method !== 'POST') {
-    res.setHeader('Allow', 'POST,GET,HEAD,OPTIONS');
+    res.setHeader('Allow', 'POST');
     return res.status(405).json({ ok: false, error: 'METHOD_NOT_ALLOWED' });
   }
 
-  const debug = String(req.headers['x-debug'] || '').trim() === '1';
-
   try {
-    const body: any = req.body || {};
-    const opp: any = body.opportunity ?? body.payload?.opportunity ?? body;
+    const body: any = req.body ?? {};
+    const opp = body.opportunity ?? body.payload?.opportunity ?? body;
 
-    const locationId =
-      pick(body, 'locationId', 'Location-Id', 'customData.locationId') ??
-      pick(req.headers, 'location-id') ??
-      null;
-    const locOk = GHL_LOCATION_ID ? (locationId || '') === GHL_LOCATION_ID : true;
-
-    // HL puede mandar id arriba, en opportunity o en customData
     const opportunityId: string | undefined =
-      (pick(body, 'opportunityId', 'customData.opportunityId') ??
-        pick(opp, 'opportunityId', 'id')) || undefined;
+      body.opportunityId ?? opp?.id ?? undefined;
 
     if (!opportunityId) {
-      const out = { ok: true, skip: 'NO_OPPORTUNITY_ID' as const };
-      return res.status(200).json(debug ? { ...out, body } : out);
+      return res.status(200).json({ ok: true, skip: 'NO_OPPORTUNITY_ID' });
     }
 
-    // Ahora sí miramos también dentro de customData.*
-    const stageNameRaw =
-      (pick(
-        body,
-        'stageName',
-        'stage_name',
-        'pipelineStageName',
-        'pipeline_stage_name',
-        'customData.stageName',
-        'customData.pipelineStageName',
-        'customData.stage_name',
-        'customData.pipeline_stage_name'
-      ) ??
-        pick(
-          opp,
-          'stageName',
-          'stage_name',
-          'pipelineStageName',
-          'pipeline_stage_name'
-        )) || null;
+    // stage recibido
+    const stageNameRaw: string | null =
+      (body.stageName ?? body.pipelineStageName ?? opp?.stage_name ?? null) as any;
+    const pipelineNameRaw: string | null =
+      (body.pipelineName ?? opp?.pipeline_name ?? null) as any;
 
     if (!stageNameRaw) {
-      const out = { ok: true, skip: 'NO_STAGE_NAME' as const };
-      return res.status(200).json(debug ? { ...out, body } : out);
+      return res.status(200).json({ ok: true, skip: 'NO_STAGE_NAME', body });
     }
 
-    // Buscar prospecto por oportunidad HL
-    const { data: p, error: eP } = await supabase
+    const stageNorm = norm(stageNameRaw);
+    const pipeNorm  = norm(pipelineNameRaw);
+
+    // mapa en pipeline_stages
+    let newStage: string | null = null;
+    {
+      let q = supabase.from('pipeline_stages').select('etapas, stage').eq('stage', stageNameRaw).limit(1);
+      const { data: mapByStage } = await q.maybeSingle();
+      if (mapByStage?.etapas) newStage = mapByStage.etapas;
+    }
+    if (!newStage) newStage = stageNameRaw; // fallback – ya está normalizado en tu tabla
+
+    // buscar prospecto
+    const { data: p } = await supabase
       .from('prospectos')
       .select('id, etapa_actual, asesor_id')
       .eq('hl_opportunity_id', opportunityId)
       .maybeSingle();
 
-    if (eP) {
-      const out = { ok: true, skip: 'SELECT_ERROR' as const };
-      return res.status(200).json(debug ? { ...out, eP } : out);
-    }
     if (!p) {
-      const out = { ok: true, skip: 'PROSPECT_NOT_FOUND' as const, opportunityId };
-      return res.status(200).json(out);
+      return res.status(200).json({ ok: true, skip: 'PROSPECT_NOT_FOUND' });
     }
 
-    // Resolver asesor (si vino)
-    let asesorId: string | null = null;
-    const assignedUserId = extractAssignedUserId(body, opp);
-    if (assignedUserId) {
-      const { data: a } = await supabase
-        .from('asesores')
-        .select('id')
-        .eq('hl_user_id', String(assignedUserId))
-        .maybeSingle();
-      asesorId = a?.id ?? null;
-    }
-    if (!asesorId) asesorId = p.asesor_id ?? null; // mantenemos dueño actual
-
-    // Resolver etapa
-    const resolved = await resolveStageByName(String(stageNameRaw));
-    if (!resolved) {
-      const out = { ok: true, skip: 'STAGE_NOT_MAPPED' as const, stageNameRaw };
-      return res.status(200).json(debug ? { ...out } : out);
-    }
-    const toStage = resolved.stage;
     const fromStage = p.etapa_actual ?? null;
+    const toStage   = newStage;
 
-    const now = new Date().toISOString();
-
-    // Dedupe (≤60s)
+    // Último movimiento para dedupe (60s)
     const { data: last } = await supabase
       .from('prospecto_stage_history')
-      .select('from_stage, to_stage, changed_at')
+      .select('id, from_stage, to_stage, changed_at, asesor_id, source')
       .eq('prospecto_id', p.id)
       .order('changed_at', { ascending: false })
       .limit(1)
       .maybeSingle();
 
-    let skipInsert = false;
-    if (last) {
-      const isSame = last.from_stage === fromStage && last.to_stage === toStage;
-      const lastAt = last.changed_at ? new Date(last.changed_at).getTime() : 0;
-      const within60s = lastAt > 0 && Math.abs(Date.now() - lastAt) <= 60_000;
-      skipInsert = isSame && within60s;
+    const now = Date.now();
+    const lastAt = last?.changed_at ? new Date(last.changed_at).getTime() : 0;
+    const within60 = lastAt > 0 && (now - lastAt) <= 60_000;
+
+    if (last && last.from_stage === fromStage && last.to_stage === toStage && within60) {
+      // Si falta asesor, rellenar con el dueño actual.
+      if (!last.asesor_id && p.asesor_id) {
+        await supabase.from('prospecto_stage_history').update({ asesor_id: p.asesor_id }).eq('id', last.id);
+      }
+      return res.status(200).json({ ok: true, skip: 'DUPLICATE_60S' });
     }
 
-    if (!skipInsert) {
-      await supabase.from('prospecto_stage_history').insert([
-        {
-          prospecto_id: p.id,
-          hl_opportunity_id: opportunityId,
-          from_stage: fromStage,
-          to_stage: toStage,
-          changed_at: now,
-          source: 'WEBHOOK_HL_STAGE',
-          asesor_id: asesorId ?? null,
-        },
-      ]);
+    // Dedupe extra para PROSPECCIÓN→PROSPECCIÓN (o cualquier same-stage)
+    if (toStage === fromStage) {
+      const threeMinAgo = new Date(now - 3 * 60_000).toISOString();
+      const { data: recentSame } = await supabase
+        .from('prospecto_stage_history')
+        .select('id, to_stage, asesor_id')
+        .eq('prospecto_id', p.id)
+        .eq('to_stage', toStage)
+        .gte('changed_at', threeMinAgo)
+        .order('changed_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (recentSame) {
+        // Completa asesor si falta y salimos
+        if (!recentSame.asesor_id && p.asesor_id) {
+          await supabase.from('prospecto_stage_history').update({ asesor_id: p.asesor_id }).eq('id', recentSame.id);
+        }
+        return res.status(200).json({ ok: true, skip: 'SAME_STAGE_3MIN' });
+      }
     }
 
-    // Actualiza prospecto
-    const patch: Record<string, any> = {
-      etapa_actual: toStage,
-      stage_changed_at: now,
-      updated_at: now,
-    };
-    if (asesorId && asesorId !== p.asesor_id) patch.asesor_id = asesorId;
+    // Insertar historia
+    await supabase.from('prospecto_stage_history').insert([{
+      prospecto_id: p.id,
+      hl_opportunity_id: opportunityId,
+      from_stage: fromStage,
+      to_stage: toStage,
+      changed_at: new Date().toISOString(),
+      asesor_id: p.asesor_id ?? null,
+      source: 'WEBHOOK_HL_STAGE',
+    }]);
 
-    await supabase.from('prospectos').update(patch).eq('id', p.id);
+    // Actualizar prospecto
+    await supabase
+      .from('prospectos')
+      .update({
+        etapa_actual: toStage,
+        stage_changed_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', p.id);
 
-    return res.status(200).json(
-      debug
-        ? {
-            ok: true,
-            opportunityId,
-            fromStage,
-            toStage,
-            asesorId,
-            saved: !skipInsert,
-            locOk,
-          }
-        : { ok: true }
-    );
+    return res.status(200).json({ ok: true, changed: true, prospecto_id: p.id, fromStage, toStage });
   } catch (e: any) {
     return res.status(200).json({ ok: true, handled: false, error: e?.message || String(e) });
   }
