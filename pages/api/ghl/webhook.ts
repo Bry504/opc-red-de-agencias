@@ -50,36 +50,52 @@ async function fetchOpportunityFromHL(opportunityId: string): Promise<HLFetchRes
     `https://api.leadconnectorhq.com/opportunities/${encodeURIComponent(opportunityId)}`,
   ];
 
+  // valor por defecto para evitar "posible no inicializada"
+  let last: HLFetchResult = { ok: false };
+
   // 1) intenta con Location-Id (si lo hay)
   for (const u of urls) {
     const r = await fetchHL(u, withLocation);
     if (r.ok) return r;
-    // guarda el último y sigue intentos
-    var last = r;
+    last = r; // guarda el último e intenta siguiente
   }
 
-  // 2) reintento SIN Location-Id (algunas cuentas lo prefieren/lo rechazan)
+  // 2) reintento SIN Location-Id
   for (const u of urls) {
     const r = await fetchHL(u, baseHeaders);
     if (r.ok) return r;
     last = r;
   }
-  return last ?? { ok: false };
+
+  return last;
+}
+
+// --- utilidades -----------------------------
+
+function coerceId(v: any): string | null {
+  if (v == null) return null;
+  if (typeof v === 'string' || typeof v === 'number') return String(v);
+  if (typeof v === 'object' && v.id != null) return String(v.id);
+  return null;
 }
 
 function extractAssignedUserId(obj: any): string | null {
   const cands = [
-    obj?.assignedUserId,
-    obj?.userId,
-    obj?.assigned_to?.id,
-    obj?.assignedTo?.id,
-    obj?.opportunity?.assignedTo?.id,
-    obj?.opportunity?.assignedUserId,
-    obj?.data?.assignedUserId,
-    obj?.result?.assignedUserId,
-  ].filter(Boolean);
-  return cands.length ? String(cands[0]) : null;
+    coerceId(obj?.assignedUserId),
+    coerceId(obj?.userId),
+    coerceId(obj?.assigned_to),
+    coerceId(obj?.assigned_to?.id),
+    coerceId(obj?.assignedTo),
+    coerceId(obj?.assignedTo?.id),
+    coerceId(obj?.opportunity?.assignedTo),
+    coerceId(obj?.opportunity?.assignedTo?.id),
+    coerceId(obj?.opportunity?.assignedUserId),
+    coerceId(obj?.data?.assignedUserId),
+    coerceId(obj?.result?.assignedUserId),
+  ].filter(Boolean) as string[];
+  return cands.length ? cands[0] : null;
 }
+
 function pick(body: any, ...keys: string[]) {
   for (const k of keys) {
     const v = body?.[k];
@@ -87,6 +103,8 @@ function pick(body: any, ...keys: string[]) {
   }
   return null;
 }
+
+// --------------------------------------------
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') {
@@ -103,25 +121,28 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const body: any = req.body || {};
     const opp = body.opportunity ?? body.payload?.opportunity ?? body;
 
+    // id de la oportunidad
     const opportunityId: string | undefined =
-      pick(body, 'opportunityId') ?? opp?.id ?? undefined;
+      coerceId(pick(body, 'opportunityId')) ?? coerceId(opp?.id) ?? undefined;
 
     if (!opportunityId) {
       const out = { ok: true, skip: 'NO_OPPORTUNITY_ID' as const };
       return res.status(200).json(debug ? { ...out, body } : out);
     }
 
-    // 1) del payload
-    let assignedUserId =
-      pick(body, 'assignedUserId', 'userId') ??
+    // 1) intentar sacar assignedUserId del payload (incluyendo si viene como objeto)
+    let assignedUserId: string | null =
+      coerceId(pick(body, 'assignedUserId')) ??
+      coerceId(pick(body, 'userId')) ??
       extractAssignedUserId(opp);
 
+    // indicadores de debug para la consulta HL
     let hlFetchTried = false;
     let hlFetchOk = false;
     let hlStatus: number | undefined = undefined;
     let hlTextStart: string | null | undefined = undefined;
 
-    // 2) si no vino, consulta HL
+    // 2) si no vino el assigned, consulta HL por la oportunidad
     if (!assignedUserId) {
       hlFetchTried = true;
       const r = await fetchOpportunityFromHL(opportunityId);
@@ -133,6 +154,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       }
     }
 
+    // si aún no se pudo obtener, salir silenciosamente
     if (!assignedUserId) {
       const out = {
         ok: true,
@@ -145,7 +167,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(200).json(out);
     }
 
-    // 3) busca prospecto
+    // 3) buscar el prospecto por opportunity id
     const { data: prospect, error: ePros } = await supabase
       .from('prospectos')
       .select('id, asesor_id, hl_opportunity_id')
@@ -161,7 +183,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(200).json(out);
     }
 
-    // 4) mapea HL user -> asesores.id
+    // 4) mapear HL user -> asesores.id
     const { data: asesor } = await supabase
       .from('asesores')
       .select('id')
@@ -173,7 +195,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(200).json(out);
     }
 
-    // 5) actualiza prospecto si cambió
+    // 5) actualizar prospecto sólo si cambió el asesor
     let updatedProspect = false;
     if (asesor.id !== prospect.asesor_id) {
       const { error: upErr } = await supabase
