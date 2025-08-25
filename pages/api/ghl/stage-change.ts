@@ -20,12 +20,13 @@ function norm(s?: string | null) {
     .toLowerCase();
 }
 
-function pick(body: any, ...keys: string[]) {
+/** Soporta rutas con puntos, p.ej. "customData.stageName" */
+function pick(obj: any, ...keys: string[]) {
   for (const k of keys) {
+    if (!obj) break;
     if (k.includes('.')) {
-      // soporte de rutas tipo "opportunity.stage_name"
       const parts = k.split('.');
-      let cur: any = body;
+      let cur: any = obj;
       let ok = true;
       for (const p of parts) {
         if (cur && p in cur) cur = cur[p];
@@ -35,33 +36,32 @@ function pick(body: any, ...keys: string[]) {
         }
       }
       if (ok && cur != null) return cur;
-    } else if (body?.[k] != null) {
-      return body[k];
+    } else if (obj?.[k] != null) {
+      return obj[k];
     }
   }
   return null;
 }
 
-/** Devuelve {stage, etapas} de la tabla pipeline_stages según un nombre de etapa */
+/** Devuelve {stage, etapas} de pipeline_stages a partir del nombre mostrado en HL */
 async function resolveStageByName(stageNameRaw: string) {
   const nameN = norm(stageNameRaw);
 
-  // Traemos todas una sola vez y resolvemos en memoria (8 filas)
   const { data: all, error } = await supabase
     .from('pipeline_stages')
     .select('stage, etapas');
 
   if (error || !all) return null;
 
-  // 1) match por 'etapas' (texto humano)
+  // 1) coincide por 'etapas' (texto humano)
   let hit = all.find((r) => norm(r.etapas) === nameN);
   if (hit) return hit;
 
-  // 2) match por 'stage' (código en mayúsculas con underscores)
+  // 2) coincide por 'stage' (código)
   hit = all.find((r) => norm(r.stage) === nameN);
   if (hit) return hit;
 
-  // 3) heuristic: reemplazar espacios por underscores
+  // 3) intento extra: reemplaza espacios por _
   const asCode = nameN.replace(/\s+/g, '_');
   hit = all.find((r) => norm(r.stage) === asCode);
   if (hit) return hit;
@@ -72,6 +72,7 @@ async function resolveStageByName(stageNameRaw: string) {
 function extractAssignedUserId(body: any, opp: any): string | null {
   const cands = [
     pick(body, 'assignedUserId', 'userId', 'assigned_to.id', 'assignedTo.id'),
+    pick(body, 'customData.assignedUserId'),
     pick(opp, 'assignedUserId', 'userId', 'assigned_to.id', 'assignedTo.id'),
   ].filter(Boolean) as string[];
   return cands.length ? String(cands[0]) : null;
@@ -80,7 +81,6 @@ function extractAssignedUserId(body: any, opp: any): string | null {
 /* --------------- handler ------------------ */
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  // health
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method || '')) {
     res.setHeader('Allow', 'POST,GET,HEAD,OPTIONS');
     return res.status(200).json({ ok: true });
@@ -97,13 +97,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const opp: any = body.opportunity ?? body.payload?.opportunity ?? body;
 
     const locationId =
-      pick(body, 'locationId', 'Location-Id') ??
+      pick(body, 'locationId', 'Location-Id', 'customData.locationId') ??
       pick(req.headers, 'location-id') ??
       null;
     const locOk = GHL_LOCATION_ID ? (locationId || '') === GHL_LOCATION_ID : true;
 
+    // HL puede mandar id arriba, en opportunity o en customData
     const opportunityId: string | undefined =
-      (pick(body, 'opportunityId') ??
+      (pick(body, 'opportunityId', 'customData.opportunityId') ??
         pick(opp, 'opportunityId', 'id')) || undefined;
 
     if (!opportunityId) {
@@ -111,11 +112,26 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(200).json(debug ? { ...out, body } : out);
     }
 
-    // Aceptamos todas las variantes conocidas
+    // Ahora sí miramos también dentro de customData.*
     const stageNameRaw =
-      (pick(body, 'stageName', 'stage_name', 'pipelineStageName', 'pipeline_stage_name') ??
-        pick(opp, 'stageName', 'stage_name', 'pipelineStageName', 'pipeline_stage_name')) ||
-      null;
+      (pick(
+        body,
+        'stageName',
+        'stage_name',
+        'pipelineStageName',
+        'pipeline_stage_name',
+        'customData.stageName',
+        'customData.pipelineStageName',
+        'customData.stage_name',
+        'customData.pipeline_stage_name'
+      ) ??
+        pick(
+          opp,
+          'stageName',
+          'stage_name',
+          'pipelineStageName',
+          'pipeline_stage_name'
+        )) || null;
 
     if (!stageNameRaw) {
       const out = { ok: true, skip: 'NO_STAGE_NAME' as const };
@@ -149,21 +165,20 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         .maybeSingle();
       asesorId = a?.id ?? null;
     }
-    // fallback: mantenemos dueño actual si no vino
-    if (!asesorId) asesorId = p.asesor_id ?? null;
+    if (!asesorId) asesorId = p.asesor_id ?? null; // mantenemos dueño actual
 
-    // Resolver etapa de destino a partir del nombre recibido
+    // Resolver etapa
     const resolved = await resolveStageByName(String(stageNameRaw));
     if (!resolved) {
       const out = { ok: true, skip: 'STAGE_NOT_MAPPED' as const, stageNameRaw };
-      return res.status(200).json(debug ? { ...out, stageListExpected: 'pipeline_stages' } : out);
+      return res.status(200).json(debug ? { ...out } : out);
     }
-    const toStage = resolved.stage; // p.ej. 'PROSPECCION'
+    const toStage = resolved.stage;
     const fromStage = p.etapa_actual ?? null;
 
     const now = new Date().toISOString();
 
-    // Dedupe rápido: último movimiento igual en ≤60s
+    // Dedupe (≤60s)
     const { data: last } = await supabase
       .from('prospecto_stage_history')
       .select('from_stage, to_stage, changed_at')
@@ -194,7 +209,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       ]);
     }
 
-    // Actualizar prospecto (etapa_actual + fecha de cambio + dueño si cambió)
+    // Actualiza prospecto
     const patch: Record<string, any> = {
       etapa_actual: toStage,
       stage_changed_at: now,
