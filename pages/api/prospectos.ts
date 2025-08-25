@@ -330,6 +330,18 @@ try {
     dniCe: dniN || null,
     comentario,
   });
+  
+    // <<< NUEVO: guardar IDs de HL en la fila del prospecto >>>
+  if (r?.opportunityId) {
+    await supabase
+      .from('prospectos')
+      .update({
+        hl_opportunity_id: r.opportunityId,
+        hl_pipeline_id: GHL_PIPELINE_ID || null, // o el nombre si prefieres
+      })
+      .eq('id', data.id);
+  }
+  // <<< FIN NUEVO >>>
 
   // Construir patch con lo que venga de HL
   const patch: any = {};
