@@ -20,7 +20,7 @@ const GHL_TOKEN = process.env.GHL_ACCESS_TOKEN ?? '';
 const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID ?? '';
 const GHL_PIPELINE_ID = process.env.GHL_PIPELINE_ID ?? '';
 const GHL_STAGE_ID_PROSPECCION = process.env.GHL_STAGE_ID_PROSPECCION ?? '';
-const GHL_CF_DNI_ID = process.env.GHL_CF_DNI_ID ?? ''; // ← ID del custom field DNI/CE en HighLevel
+const GHL_CF_DNI_ID = process.env.GHL_CF_DNI_ID ?? ''; // ID del custom field DNI/CE en HL
 
 // --- utils ---
 function cleanPhone(v: string) { return v?.replace(/\D/g, '').slice(-9); }
@@ -72,7 +72,6 @@ async function pushToHighLevel({
     'Location-Id': GHL_LOCATION_ID,
   } as const;
 
-  // ---------- helpers ----------
   async function fetchOppById(id: string): Promise<any | null> {
     const urls = [
       `https://services.leadconnectorhq.com/opportunities/${encodeURIComponent(id)}`,
@@ -82,9 +81,7 @@ async function pushToHighLevel({
       try {
         const r = await fetch(url, { headers: baseHeaders });
         if (r.ok) return await r.json().catch(() => ({}));
-      } catch (e) {
-        /* ignore and try next domain */
-      }
+      } catch (_) {/* try next */}
     }
     return null;
   }
@@ -108,13 +105,13 @@ async function pushToHighLevel({
     body: JSON.stringify(upsertBody),
   });
   if (!upsertRes.ok) {
-    console.warn('GHL upsert failed', upsertRes.status, await upsertRes.text().catch(()=>''));
+    console.warn('GHL upsert failed', upsertRes.status, await upsertRes.text().catch(()=>'')); 
     return { ok: false };
   }
   const upsertJson: any = await upsertRes.json().catch(() => ({}));
   let contactId: string | undefined = upsertJson?.id || upsertJson?.contact?.id;
 
-  // fallback: buscar por teléfono
+  // fallback por teléfono
   if (!contactId && phoneE164) {
     try {
       const s = await fetch(
@@ -138,7 +135,7 @@ async function pushToHighLevel({
         headers: baseHeaders,
         body: JSON.stringify({ tags }),
       });
-      if (!t.ok) console.warn('GHL add-tags failed', t.status, await t.text().catch(()=>''));
+      if (!t.ok) console.warn('GHL add-tags failed', t.status, await t.text().catch(()=>'')); 
     }
   } catch (e) {
     console.warn('GHL add-tags error', e);
@@ -165,11 +162,9 @@ async function pushToHighLevel({
   }
 
   let oppRes = await postOpp('https://services.leadconnectorhq.com/opportunities/');
-  if (oppRes.status === 404) {
-    oppRes = await postOpp('https://api.leadconnectorhq.com/opportunities/');
-  }
+  if (oppRes.status === 404) oppRes = await postOpp('https://api.leadconnectorhq.com/opportunities/');
   if (!oppRes.ok) {
-    console.warn('GHL opportunity failed', oppRes.status, await oppRes.text().catch(()=>''));
+    console.warn('GHL opportunity failed', oppRes.status, await oppRes.text().catch(()=>'')); 
     return { ok: true, contactId };
   }
 
@@ -177,14 +172,13 @@ async function pushToHighLevel({
   let opportunityId: string | undefined =
     oppJson?.id || oppJson?.opportunity?.id || oppJson?.data?.id || oppJson?.result?.id;
 
-  // Fallback: consulta detalle para capturar pipeline/assigned
+  // Detalle para conocer pipeline/assigned
   let pipelineId: string | undefined = oppPayload.pipelineId;
   let assignedUserId: string | undefined;
 
   if (opportunityId) {
     const detail = await fetchOppById(opportunityId);
     if (detail) {
-      // intenta varias formas posibles
       pipelineId =
         detail?.pipelineId ||
         detail?.opportunity?.pipelineId ||
@@ -212,7 +206,7 @@ async function pushToHighLevel({
         `https://services.leadconnectorhq.com/contacts/${contactId}/notes`,
         { method: 'POST', headers: baseHeaders, body: JSON.stringify({ body: note }) }
       );
-      if (!noteResp.ok) console.warn('Nota no creada:', await noteResp.text().catch(()=>''));
+      if (!noteResp.ok) console.warn('Nota no creada:', await noteResp.text().catch(()=>'')); 
     } catch (e) {
       console.warn('Error creando nota:', e);
     }
@@ -261,7 +255,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     if (!isValidDniCe(dni_ce))            return res.status(200).json({ ok: false, error: 'VALIDATION' });
     if (!isValidEmail(emailRaw))          return res.status(200).json({ ok: false, error: 'VALIDATION' });
 
-    // --- precheck server-side (RPC) para duplicados ---
+    // --- precheck RPC duplicados ---
     const celN   = celular.replace(/^51/, '').replace(/^0+/, '');
     const dniN   = (dni_ce ?? '').trim();
     const emailN = (emailRaw ?? '').trim().toLowerCase().replace(/\s+/g, '');
@@ -278,7 +272,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(200).json({ ok: false, error: 'DUPLICADO' });
     }
 
-    // --- insert ---
+    // --- insert local ---
     const ipHeader = req.headers['x-forwarded-for'];
     const ip = (typeof ipHeader === 'string' && ipHeader)
       ? ipHeader.split(',')[0].trim()
@@ -296,8 +290,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         proyecto_interes,
         comentario,
         lat,
-        long: longVal,                       // << importante: columna se llama "long"
-        opc_id: opc.id,                      // << FK al captador
+        long: longVal,                       // columna se llama "long"
+        opc_id: opc.id,                      // FK al captador
         etapa_actual: 'PROSPECCION',
         stage_changed_at: new Date().toISOString(),
         ip_insercion: ip
@@ -317,63 +311,57 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(200).json({ ok: false, error: 'ERROR_DESCONOCIDO' });
     }
 
-// ======= Enviar a HighLevel (NO bloqueante) =======
-try {
-  const r = await pushToHighLevel({
-    nombre,
-    apellido,
-    celular9: celular,
-    email: emailN || null,
-    proyecto: proyecto_interes,
-    opcCodigo: opc.codigo,
-    lugarProspeccion: lugar_prospeccion,
-    dniCe: dniN || null,
-    comentario,
-  });
+    // ======= Enviar a HighLevel (NO bloqueante) =======
+    try {
+      const r = await pushToHighLevel({
+        nombre,
+        apellido,
+        celular9: celular,
+        email: emailN || null,
+        proyecto: proyecto_interes,
+        opcCodigo: opc.codigo,
+        lugarProspeccion: lugar_prospeccion,
+        dniCe: dniN || null,
+        comentario,
+      });
 
-  // <<< NUEVO: guardar IDs de HL en la fila del prospecto >>>
-  if (r?.opportunityId) {
-    await supabase
-      .from('prospectos')
-      .update({
-        hl_opportunity_id: r.opportunityId,
-        hl_pipeline_id: GHL_PIPELINE_ID || null, // opcional
-      })
-      .eq('id', data.id);
+      // patch con lo que venga de HL (ids)
+      const patch: any = {};
+      if (r?.opportunityId) patch.hl_opportunity_id = r.opportunityId;
+      if (r?.pipelineId)    patch.hl_pipeline_id   = String(r.pipelineId);
+
+      // mapear asesor por hl_user_id (si vino)
+      if (r?.assignedUserId) {
+        const { data: a } = await supabase
+          .from('asesores')
+          .select('id')
+          .eq('hl_user_id', String(r.assignedUserId))
+          .maybeSingle();
+        if (a?.id) patch.asesor_id = a.id;
+      }
+
+      if (Object.keys(patch).length) {
+        await supabase.from('prospectos').update(patch).eq('id', data.id);
+      }
+
+      // --------- HISTORIAL INICIAL: NULL -> PROSPECCION ----------
+      await supabase.from('prospecto_stage_history').insert({
+        prospecto_id: data.id,
+        hl_opportunity_id: r?.opportunityId ?? null,
+        from_stage: null,
+        to_stage: 'PROSPECCION',
+        changed_at: new Date().toISOString(),
+        asesor_id: patch.asesor_id ?? null,
+        source: 'SYSTEM',
+      });
+      // -----------------------------------------------------------
+
+    } catch (e) {
+      console.warn('pushToHighLevel error:', e);
+    }
+
+    return res.status(200).json({ ok: true, id: data.id });
+  } catch {
+    return res.status(200).json({ ok: false, error: 'ERROR_DESCONOCIDO' });
   }
-  // Construir patch con lo que venga de HL (asesor, pipeline)
-  const patch: any = {};
-  if (r?.opportunityId) patch.hl_opportunity_id = r.opportunityId;
-  if (r?.pipelineId)    patch.hl_pipeline_id   = String(r.pipelineId);
-
-  if (r?.assignedUserId) {
-    const { data: a } = await supabase
-      .from('asesores')
-      .select('id')
-      .eq('hl_user_id', String(r.assignedUserId))
-      .maybeSingle();
-    if (a?.id) patch.asesor_id = a.id;
-  }
-  if (Object.keys(patch).length) {
-    await supabase.from('prospectos').update(patch).eq('id', data.id);
-  }
-
-  // <<< NUEVO: ESCRIBIR HISTORIAL SOLO DE ETAPAS >>>
-  // Primer registro del historial: NULL -> PROSPECCION (source=SYSTEM)
-  await supabase.from('prospecto_stage_history').insert({
-    prospecto_id: data.id,
-    hl_opportunity_id: r?.opportunityId ?? null,
-    from_stage: null,
-    to_stage: 'PROSPECCION',
-    changed_at: new Date().toISOString(),
-    asesor_id: patch.asesor_id ?? null,
-    source: 'SYSTEM',
-  });
-  // <<< FIN NUEVO >>>
-
-} catch (e) {
-  console.warn('pushToHighLevel error:', e);
-}
-
-return res.status(200).json({ ok: true, id: data.id });
 }
