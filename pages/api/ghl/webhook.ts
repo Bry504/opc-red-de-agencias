@@ -50,27 +50,24 @@ async function fetchOpportunityFromHL(opportunityId: string): Promise<HLFetchRes
     `https://api.leadconnectorhq.com/opportunities/${encodeURIComponent(opportunityId)}`,
   ];
 
-  // valor por defecto para evitar "posible no inicializada"
   let last: HLFetchResult = { ok: false };
 
-  // 1) intenta con Location-Id (si lo hay)
+  // 1) con Location-Id
   for (const u of urls) {
     const r = await fetchHL(u, withLocation);
     if (r.ok) return r;
-    last = r; // guarda el último e intenta siguiente
+    last = r;
   }
-
-  // 2) reintento SIN Location-Id
+  // 2) sin Location-Id
   for (const u of urls) {
     const r = await fetchHL(u, baseHeaders);
     if (r.ok) return r;
     last = r;
   }
-
   return last;
 }
 
-// --- utilidades -----------------------------
+// --- utils -----------------------------------------
 
 function coerceId(v: any): string | null {
   if (v == null) return null;
@@ -104,7 +101,7 @@ function pick(body: any, ...keys: string[]) {
   return null;
 }
 
-// --------------------------------------------
+// ---------------------------------------------------
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') {
@@ -167,10 +164,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(200).json(out);
     }
 
-    // 3) buscar el prospecto por opportunity id
+    // 3) buscar el prospecto por opportunity id (ahora también traemos etapa_actual)
     const { data: prospect, error: ePros } = await supabase
       .from('prospectos')
-      .select('id, asesor_id, hl_opportunity_id')
+      .select('id, asesor_id, hl_opportunity_id, etapa_actual')
       .eq('hl_opportunity_id', opportunityId)
       .maybeSingle();
 
@@ -195,14 +192,53 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(200).json(out);
     }
 
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const currStage = prospect.etapa_actual ?? null;
+
     // 5) actualizar prospecto sólo si cambió el asesor
     let updatedProspect = false;
     if (asesor.id !== prospect.asesor_id) {
       const { error: upErr } = await supabase
         .from('prospectos')
-        .update({ asesor_id: asesor.id, updated_at: new Date().toISOString() })
+        .update({ asesor_id: asesor.id, updated_at: nowIso })
         .eq('id', prospect.id);
       updatedProspect = !upErr;
+    }
+
+    // 6) registrar en historial (misma etapa) sólo si hubo cambio de asesor
+    if (updatedProspect) {
+      // dedupe simple: evita duplicar si el último registro es igual en ≤ 60s
+      const { data: last } = await supabase
+        .from('prospecto_stage_history')
+        .select('from_stage,to_stage,changed_at,asesor_id')
+        .eq('prospecto_id', prospect.id)
+        .order('changed_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      let shouldInsert = true;
+      if (last) {
+        const same =
+          (last.from_stage ?? null) === currStage &&
+          (last.to_stage ?? null) === currStage &&
+          (last.asesor_id ?? null) === asesor.id;
+        const lastAt = last.changed_at ? new Date(last.changed_at).getTime() : 0;
+        const within60s = lastAt > 0 && Math.abs(now.getTime() - lastAt) <= 60_000;
+        if (same && within60s) shouldInsert = false;
+      }
+
+      if (shouldInsert) {
+        await supabase.from('prospecto_stage_history').insert([{
+          prospecto_id: prospect.id,
+          hl_opportunity_id: opportunityId,
+          from_stage: currStage,
+          to_stage: currStage,
+          changed_at: nowIso,
+          asesor_id: asesor.id,
+          source: 'ASSIGN', // o 'WEBHOOK_HL', como prefieras etiquetar
+        }]);
+      }
     }
 
     return res.status(200).json({
@@ -211,6 +247,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       assignedUserId,
       asesorId: asesor.id,
       updatedProspect,
+      insertedHistory: updatedProspect, // true si se intentó insertar historial
       foundBy: 'payload_or_hl',
     });
   } catch (e: any) {
