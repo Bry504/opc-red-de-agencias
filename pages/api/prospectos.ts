@@ -157,7 +157,7 @@ async function pushToHighLevel({
     pipelineStageId: GHL_STAGE_ID_PROSPECCION,
     status: 'open',
     source: 'OPC',
-    name: `${nombre} ${apellido} - OPC`,
+    name: `${nombre} ${apellido}`,
   };
 
   async function postOpp(url: string) {
@@ -330,7 +330,7 @@ try {
     dniCe: dniN || null,
     comentario,
   });
-  
+
     // <<< NUEVO: guardar IDs de HL en la fila del prospecto >>>
   if (r?.opportunityId) {
     await supabase
