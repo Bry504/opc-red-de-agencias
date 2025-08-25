@@ -2,233 +2,129 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { createClient } from '@supabase/supabase-js';
 
-const SUPABASE_URL =
-  process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.SUPABASE_URL ?? '';
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.SUPABASE_URL ?? '';
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
+const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID ?? '';
+const GHL_ACCESS_TOKEN = process.env.GHL_ACCESS_TOKEN ?? ''; // <- necesario para consultar HL
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID ?? '';
+// consulta detalle de oportunidad en HL para conocer el assignedTo.id
+async function fetchOppAssignedUserId(opportunityId: string): Promise<string | null> {
+  if (!GHL_ACCESS_TOKEN) return null;
 
-// ----------------- helpers -----------------
-function pickAssignedId(payload: any): string | null {
-  return (
-    payload?.assignedUserId ||
-    payload?.userId ||
-    payload?.assigned_to?.id ||
-    payload?.assignedTo?.id ||
-    null
-  );
-}
+  const baseHeaders = {
+    Authorization: `Bearer ${GHL_ACCESS_TOKEN}`,
+    Accept: 'application/json',
+    'Content-Type': 'application/json',
+    Version: '2021-07-28',
+    'Location-Id': GHL_LOCATION_ID,
+  } as const;
 
-// normaliza texto: quita acentos, minúsculas y recorta
-function norm(s?: string | null) {
-  return (s ?? '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .trim();
+  const urls = [
+    `https://services.leadconnectorhq.com/opportunities/${encodeURIComponent(opportunityId)}`,
+    `https://api.leadconnectorhq.com/opportunities/${encodeURIComponent(opportunityId)}`,
+  ];
+
+  for (const url of urls) {
+    try {
+      const r = await fetch(url, { headers: baseHeaders });
+      if (!r.ok) continue;
+      const j: any = await r.json().catch(() => ({}));
+      // intenta varias rutas típicas
+      const uid =
+        j?.assignedUserId ||
+        j?.assignedTo?.id ||
+        j?.userId ||
+        j?.opportunity?.assignedTo?.id ||
+        j?.data?.assignedUserId ||
+        null;
+      if (uid) return String(uid);
+    } catch (_) {}
+  }
+  return null;
 }
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  // preflight / health
-  if (req.method === 'OPTIONS' || req.method === 'HEAD' || req.method === 'GET') {
-    res.setHeader('Allow', 'POST,GET,OPTIONS,HEAD');
-    return res.status(200).json({ ok: true });
-  }
   if (req.method !== 'POST') {
-    res.setHeader('Allow', 'POST,GET,OPTIONS,HEAD');
-    return res.status(405).json({ ok: false, error: 'METHOD_NOT_ALLOWED' });
+    res.setHeader('Allow', 'POST');
+    return res.status(405).json({ error: 'METHOD_NOT_ALLOWED' });
   }
 
   try {
     const body: any = req.body || {};
-    const locHeader = req.headers['location-id'] as string | undefined;
-    const locationId = body.locationId || locHeader || null;
 
     // validación suave por location
+    const locHeader = req.headers['location-id'] as string | undefined;
+    const locationId = body.locationId || locHeader || null;
     if (GHL_LOCATION_ID && locationId && locationId !== GHL_LOCATION_ID) {
-      console.warn('WEBHOOK_HL location mismatch', { got: locationId, want: GHL_LOCATION_ID });
+      console.warn('WEBHOOK_HL_ASSIGN location mismatch', { got: locationId, want: GHL_LOCATION_ID });
     }
 
-    // HL a veces anida la oportunidad
+    // IDs básicos
     const opp: any = body.opportunity ?? body.payload?.opportunity ?? body;
-
-    // id de oportunidad HL
     const opportunityId: string | undefined = body.opportunityId ?? opp?.id;
-    if (!opportunityId) {
-      console.log('WEBHOOK_HL skip: NO_OPPORTUNITY_ID');
-      return res.status(200).json({ ok: true, skip: 'NO_OPPORTUNITY_ID' });
-    }
+    if (!opportunityId) return res.status(200).json({ ok: true, skip: 'NO_OPPORTUNITY_ID' });
 
-    // valores recibidos (por id o por nombre)
-    const stageIdRaw: string | null = (body.pipelineStageId ?? opp?.pipelineStageId ?? null) as any;
-    const stageNameRaw: string | null =
-      (body.pipelineStageName ?? body.stageName ?? opp?.stage_name ?? null) as any;
-
-    const pipelineIdRaw: string | null = (body.pipelineId ?? opp?.pipelineId ?? null) as any;
-    const pipelineNameRaw: string | null =
-      (body.pipelineName ?? opp?.pipeline_name ?? null) as any;
-
-    const stageNameNorm = norm(stageNameRaw);
-    const pipelineNameNorm = norm(pipelineNameRaw);
-
-    const assignedId = pickAssignedId(body) ?? pickAssignedId(opp);
-
-    // buscar prospecto por hl_opportunity_id
-    const { data: p, error: eP } = await supabase
+    // 1) buscar prospecto local
+    const { data: p } = await supabase
       .from('prospectos')
       .select('id, etapa_actual, asesor_id')
       .eq('hl_opportunity_id', opportunityId)
       .maybeSingle();
 
-    if (eP) {
-      console.warn('WEBHOOK_HL select prospect error', eP);
-      return res.status(200).json({ ok: true, skip: 'SELECT_ERROR' });
-    }
-    if (!p) {
-      console.log('WEBHOOK_HL skip: PROSPECT_NOT_FOUND', { opportunityId });
-      return res.status(200).json({ ok: true, skip: 'PROSPECT_NOT_FOUND' });
-    }
+    if (!p) return res.status(200).json({ ok: true, skip: 'PROSPECT_NOT_FOUND' });
 
-    // resolver asesor (si vino)
-    let asesorId: string | null = null;
-    if (assignedId) {
-      const { data: a } = await supabase
-        .from('asesores')
-        .select('id')
-        .eq('hl_user_id', String(assignedId))
-        .maybeSingle();
-      asesorId = a?.id ?? null;
+    // 2) obtener HL user id
+    //    - primero, usa lo que venga en el body (si lo pusiste)
+    //    - si no hay, consulta HL para leer el assignedTo.id correcto
+    let hlUserId: string | null =
+      (body.assignedUserId ?? body.userId ?? body.assigned_to?.id ?? body.assignedTo?.id ?? opp?.assignedUserId)
+        ? String(body.assignedUserId ?? body.userId ?? body.assigned_to?.id ?? body.assignedTo?.id ?? opp?.assignedUserId)
+        : null;
+
+    if (!hlUserId) {
+      hlUserId = await fetchOppAssignedUserId(opportunityId);
     }
 
-    // resolver etapa nueva
-    let newStage: string | null = null;
+    if (!hlUserId) return res.status(200).json({ ok: true, skip: 'NO_ASSIGNED_USER' });
 
-    // 1) por stageId directo (si algún día lo manda HL)
-    if (stageIdRaw) {
-      const { data: mapById } = await supabase
-        .from('hl_stage_map')
-        .select('stage')
-        .eq('hl_stage_id', String(stageIdRaw))
-        .maybeSingle();
-      newStage = mapById?.stage ?? null;
+    // 3) mapear a asesores.id
+    const { data: a } = await supabase
+      .from('asesores')
+      .select('id')
+      .eq('hl_user_id', hlUserId)
+      .maybeSingle();
+
+    const nuevoAsesorId = a?.id ?? null;
+    if (!nuevoAsesorId) {
+      console.log('WEBHOOK_HL_ASSIGN asesor no mapeado', { hlUserId });
+      return res.status(200).json({ ok: true, skip: 'ASESOR_NOT_MAPPED' });
     }
 
-    // 2) por nombre normalizado + pipeline normalizado
-    if (!newStage && (stageNameNorm || pipelineNameNorm)) {
-      let q = supabase.from('hl_stage_map').select('stage').limit(1);
-      if (stageNameNorm) q = q.eq('hl_stage_name_norm', stageNameNorm);
-      if (pipelineNameNorm) q = q.eq('hl_pipeline_name_norm', pipelineNameNorm);
-      const { data: mapByName } = await q.maybeSingle();
-      newStage = mapByName?.stage ?? null;
-
-      // fallback: solo por etapa si fuera única
-      if (!newStage && stageNameNorm) {
-        const { data: mapOnlyStage } = await supabase
-          .from('hl_stage_map')
-          .select('stage')
-          .eq('hl_stage_name_norm', stageNameNorm)
-          .maybeSingle();
-        newStage = mapOnlyStage?.stage ?? null;
-      }
-    }
-
-    // válvula de seguridad
-    if (!newStage) {
-      console.log('WEBHOOK_HL skip: UNKNOWN_STAGE', {
-        stageIdRaw,
-        stageNameRaw,
-        pipelineNameRaw,
-      });
-      return res.status(200).json({ ok: true, skip: 'UNKNOWN_STAGE' });
-    }
-
-    console.log('WEBHOOK_HL incoming', {
-      opportunityId,
-      stageIdRaw,
-      stageNameRaw,
-      pipelineIdRaw,
-      pipelineNameRaw,
-      resolvedStage: newStage,
-    });
-
-    // actualizar prospecto
-    const patch: Record<string, any> = {};
+    // 4) actualizar prospecto si cambió
     const nowIso = new Date().toISOString();
-
-    if (pipelineIdRaw) patch.hl_pipeline_id = String(pipelineIdRaw);
-    else if (pipelineNameRaw) patch.hl_pipeline_id = String(pipelineNameRaw);
-
-    if (asesorId && asesorId !== p.asesor_id) patch.asesor_id = asesorId;
-
-    const fromStage = p.etapa_actual ?? null;
-    const stageChanged = newStage !== p.etapa_actual;
-
-    if (stageChanged) {
-      patch.etapa_actual = newStage;
-      patch.stage_changed_at = nowIso;
-    }
-    if (Object.keys(patch).length) {
-      patch.updated_at = nowIso;
-      const { error: upErr } = await supabase.from('prospectos').update(patch).eq('id', p.id);
-      if (upErr) console.warn('WEBHOOK_HL update prospect error', upErr);
+    if (p.asesor_id !== nuevoAsesorId) {
+      await supabase
+        .from('prospectos')
+        .update({ asesor_id: nuevoAsesorId, updated_at: nowIso })
+        .eq('id', p.id);
     }
 
-    // --- historial de etapas: SOLO desde este webhook ---
-    if (stageChanged) {
-      // dedupe lógico rápido (último movimiento igual en ≤60s)
-      const { data: last } = await supabase
-        .from('prospecto_stage_history')
-        .select('from_stage, to_stage, changed_at')
-        .eq('prospecto_id', p.id)
-        .order('changed_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
-
-      const lastFrom = last?.from_stage ?? null;
-      const lastTo = last?.to_stage ?? null;
-      const lastAt = last?.changed_at ? new Date(last.changed_at).getTime() : 0;
-      const isSameMove = lastFrom === fromStage && lastTo === newStage;
-      const within60s = lastAt > 0 && Math.abs(Date.now() - lastAt) <= 60_000;
-
-      if (isSameMove && within60s) {
-        console.log('WEBHOOK_HL deduped history (≤60s)', {
-          prospecto_id: p.id,
-          from: fromStage,
-          to: newStage,
-        });
-      } else {
-        console.log('WEBHOOK_HL stage change', {
-          prospecto_id: p.id,
-          from: fromStage,
-          to: newStage,
-        });
-
-        // ✅ upsert contra el índice único (prospecto_id, from_stage, to_stage, change_minute)
-        const row = {
-          prospecto_id: p.id,
-          hl_opportunity_id: opportunityId,
-          from_stage: fromStage,
-          to_stage: newStage,
-          changed_at: new Date().toISOString(),
-          changed_by_asesor_id: asesorId ?? null,
-          source: 'WEBHOOK_HL',
-        };
-
-        const { error: upsertErr } = await supabase
-          .from('prospecto_stage_history')
-          .upsert(row, {
-            onConflict: 'prospecto_id,from_stage,to_stage,change_minute',
-            ignoreDuplicates: true,
-          });
-
-        if (upsertErr) console.warn('WEBHOOK_HL history upsert error', upsertErr);
-      }
-    }
+    // 5) dejar rastro de asignación en historial (sin cambio de etapa)
+    await supabase.from('prospecto_stage_history').insert({
+      prospecto_id: p.id,
+      hl_opportunity_id: opportunityId,
+      from_stage: p.etapa_actual ?? 'PROSPECCION',
+      to_stage: p.etapa_actual ?? 'PROSPECCION',
+      changed_at: nowIso,
+      asesor_id: nuevoAsesorId,
+      source: 'WEBHOOK_HL_ASSIGN',
+    });
 
     return res.status(200).json({ ok: true });
   } catch (e) {
-    console.warn('WEBHOOK_HL error', e);
+    console.warn('WEBHOOK_HL_ASSIGN error', e);
     return res.status(200).json({ ok: true, handled: false });
   }
 }
