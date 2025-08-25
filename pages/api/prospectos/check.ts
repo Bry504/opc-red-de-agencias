@@ -13,7 +13,16 @@ export default async function handler(
   req: NextApiRequest,
   res: NextApiResponse<CheckResp | { error: string }>
 ) {
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+  // Preflight/health
+  if (req.method === 'OPTIONS' || req.method === 'HEAD' || req.method === 'GET') {
+    res.setHeader('Allow', 'POST,GET,OPTIONS,HEAD');
+    return res.status(200).json({ exists: false, match_on: null });
+  }
+
+  if (req.method !== 'POST') {
+    res.setHeader('Allow', 'POST,GET,OPTIONS,HEAD');
+    return res.status(405).json({ error: 'Method not allowed' });
+  }
 
   try {
     // --- auth (silenciosa) ---
@@ -22,7 +31,7 @@ export default async function handler(
     if (!opcToken) return res.status(200).json({ exists: false, match_on: null });
 
     const { data: opc, error: errOpc } = await supabaseAdmin
-      .from('ops')
+      .from('opcs')
       .select('estado')
       .eq('capture_token', opcToken)
       .single();
@@ -40,9 +49,9 @@ export default async function handler(
     }
 
     // --- normalizaciones (igual que en el RPC) ---
-    const celN = (celular ?? '').replace(/\D/g,'').replace(/^51/,'').replace(/^0+/, '');
+    const celN = (celular ?? '').replace(/\D/g, '').replace(/^51/, '').replace(/^0+/, '');
     const dniN = (dni ?? '').trim();
-    const emailN = (email ?? '').trim().toLowerCase().replace(/\s+/g,'');
+    const emailN = (email ?? '').trim().toLowerCase().replace(/\s+/g, '');
 
     const { data, error } = await supabaseAdmin.rpc('prospecto_existe', {
       p_celular: celN || null,
