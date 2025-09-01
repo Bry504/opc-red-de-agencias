@@ -34,9 +34,9 @@ function isValidEmail(v?: string) {
   if (!v) return true;
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
 }
-const sleep = (ms: number) => new Promise(r => setTimeout(r, ms)); // <<<
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-// --- Envío a HighLevel (contacto + tags + oportunidad + nota) ---
+// --- Envío a HighLevel (contacto + tags + owner opcional + oportunidad + nota) ---
 async function pushToHighLevel({
   nombre,
   apellido,
@@ -47,6 +47,9 @@ async function pushToHighLevel({
   lugarProspeccion,
   dniCe,
   comentario,
+  addRRTag,
+  rrTag,
+  targetHlUserId, // si hay asignación dependiente
 }: {
   nombre: string;
   apellido: string;
@@ -57,6 +60,9 @@ async function pushToHighLevel({
   lugarProspeccion?: string | null;
   dniCe?: string | null;
   comentario?: string | null;
+  addRRTag: boolean;
+  rrTag?: string;
+  targetHlUserId?: string | null;
 }): Promise<PushResult> {
   if (!GHL_TOKEN || !GHL_LOCATION_ID) {
     console.warn('GHL: faltan envs GHL_ACCESS_TOKEN o GHL_LOCATION_ID');
@@ -129,7 +135,12 @@ async function pushToHighLevel({
 
   // ---------- 2) Tags ----------
   try {
-    const tags = [opcCodigo, proyecto || '', lugarProspeccion || ''].filter(Boolean);
+    const tags = [
+      `OPC:${opcCodigo}`,                      // estandarizamos
+      proyecto || '',
+      lugarProspeccion || '',
+      addRRTag && rrTag ? rrTag : '',
+    ].filter(Boolean);
     if (tags.length) {
       const t = await fetch(`https://services.leadconnectorhq.com/contacts/${contactId}/tags`, {
         method: 'POST',
@@ -142,7 +153,23 @@ async function pushToHighLevel({
     console.warn('GHL add-tags error', e);
   }
 
-  // ---------- 3) Crear oportunidad ----------
+  // ---------- 3) Asignar owner del contacto (si asignación dependiente) ----------
+  if (targetHlUserId) {
+    try {
+      const assignResp = await fetch(`https://services.leadconnectorhq.com/contacts/${contactId}`, {
+        method: 'PUT',
+        headers: baseHeaders,
+        body: JSON.stringify({ assignedTo: String(targetHlUserId) }),
+      });
+      if (!assignResp.ok) {
+        console.warn('PUT /contacts assignedTo falló', assignResp.status, await assignResp.text().catch(()=>'')); 
+      }
+    } catch (e) {
+      console.warn('Error asignando owner del contacto:', e);
+    }
+  }
+
+  // ---------- 4) Crear oportunidad ----------
   if (!GHL_PIPELINE_ID || !GHL_STAGE_ID_PROSPECCION) {
     console.warn('GHL: faltan GHL_PIPELINE_ID o GHL_STAGE_ID_PROSPECCION');
     return { ok: true, contactId };
@@ -173,7 +200,7 @@ async function pushToHighLevel({
   let opportunityId: string | undefined =
     oppJson?.id || oppJson?.opportunity?.id || oppJson?.data?.id || oppJson?.result?.id;
 
-  // Detalle para conocer pipeline/assigned
+  // Detalle para conocer pipeline/assigned (para el caso RR)
   let pipelineId: string | undefined = oppPayload.pipelineId;
   let assignedUserId: string | undefined;
 
@@ -195,7 +222,7 @@ async function pushToHighLevel({
         assignedUserId;
     }
 
-    // <<< reintentos cortos por si la asignación tarda unos segundos
+    // reintentos cortos por si la asignación tarda
     if (!assignedUserId) {
       for (const delay of [400, 800]) {
         await sleep(delay);
@@ -209,10 +236,9 @@ async function pushToHighLevel({
         if (userId) { assignedUserId = String(userId); break; }
       }
     }
-    // >>>
   }
 
-  // ---------- 4) Nota opcional ----------
+  // ---------- 5) Nota opcional ----------
   if ((comentario && comentario.trim()) || lugarProspeccion || proyecto || dniCe) {
     try {
       const note =
@@ -250,6 +276,42 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       .single();
     if (opcErr || !opc || !opc.estado) {
       return res.status(200).json({ ok: false, error: 'NO_AUTORIZADO' });
+    }
+
+    // --- lee settings de asignación (RR vs dependiente) ---
+    const { data: settings, error: settingsErr } = await supabase
+      .from('assignment_settings')
+      .select('round_robin_enabled, rr_tag')
+      .eq('id', 1)
+      .single();
+    if (settingsErr || !settings) {
+      return res.status(200).json({ ok: false, error: 'SETTINGS_NOT_FOUND' });
+    }
+    const isRR = !!settings.round_robin_enabled;
+    const rrTag = String(settings.rr_tag || 'RR');
+
+    // --- si es dependiente, trae el hl_user_id del mapa ---
+    let targetHlUserId: string | null = null;
+    let targetAsesorId: string | null = null;
+
+    if (!isRR) {
+      const { data: mapRow } = await supabase
+        .from('opc_asesor_map')
+        .select('hl_user_id')
+        .eq('opc_id', opc.id)
+        .eq('activo', true)
+        .maybeSingle();
+      targetHlUserId = (mapRow?.hl_user_id ?? null) as string | null;
+
+      if (targetHlUserId) {
+        // buscar asesor_id local
+        const { data: asesorRow } = await supabase
+          .from('asesores')
+          .select('id')
+          .eq('hl_user_id', targetHlUserId)
+          .maybeSingle();
+        targetAsesorId = (asesorRow?.id ?? null) as string | null;
+      }
     }
 
     // --- campos ---
@@ -295,25 +357,29 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       ? ipHeader.split(',')[0].trim()
       : req.socket.remoteAddress || null;
 
+    // preparamos asesor_id si es dependiente
+    const baseInsert: any = {
+      lugar_prospeccion,
+      nombre: nombre.trim(),
+      apellido: apellido.trim(),
+      celular,                             // 9 dígitos
+      dni_ce: dniN || null,
+      email: emailN || null,               // normalizado al guardar
+      proyecto_interes,
+      comentario,
+      lat,
+      long: longVal,                       // columna se llama "long"
+      opc_id: opc.id,                      // FK al captador
+      etapa_actual: 'PROSPECCION',
+      stage_changed_at: new Date().toISOString(),
+      ip_insercion: ip
+    };
+    if (!isRR && targetAsesorId) baseInsert.asesor_id = targetAsesorId;
+
     const { data, error } = await supabase
       .from('prospectos')
-      .insert([{
-        lugar_prospeccion,
-        nombre: nombre.trim(),
-        apellido: apellido.trim(),
-        celular,                             // 9 dígitos
-        dni_ce: dniN || null,
-        email: emailN || null,               // normalizado al guardar
-        proyecto_interes,
-        comentario,
-        lat,
-        long: longVal,                       // columna se llama "long"
-        opc_id: opc.id,                      // FK al captador
-        etapa_actual: 'PROSPECCION',
-        stage_changed_at: new Date().toISOString(),
-        ip_insercion: ip
-      }])
-      .select('id')
+      .insert([baseInsert])
+      .select('id, asesor_id')
       .single();
 
     if (error) {
@@ -328,6 +394,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(200).json({ ok: false, error: 'ERROR_DESCONOCIDO' });
     }
 
+    const insertedProspectoId = data.id as string;
+
     // ======= Enviar a HighLevel (NO bloqueante) =======
     try {
       const r = await pushToHighLevel({
@@ -340,6 +408,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         lugarProspeccion: lugar_prospeccion,
         dniCe: dniN || null,
         comentario,
+        addRRTag: isRR,
+        rrTag,
+        targetHlUserId: !isRR ? (targetHlUserId ?? null) : null,
       });
 
       // patch con lo que venga de HL (ids)
@@ -347,8 +418,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       if (r?.opportunityId) patch.hl_opportunity_id = r.opportunityId;
       if (r?.pipelineId)    patch.hl_pipeline_id   = String(r.pipelineId);
 
-      // mapear asesor por hl_user_id (si vino)
-      if (r?.assignedUserId) {
+      // RR: si HL devolvió assignedUserId, reflejar asesor_id
+      if (isRR && r?.assignedUserId) {
         const { data: a } = await supabase
           .from('asesores')
           .select('id')
@@ -358,47 +429,59 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       }
 
       if (Object.keys(patch).length) {
-        await supabase.from('prospectos').update(patch).eq('id', data.id);
+        await supabase.from('prospectos').update(patch).eq('id', insertedProspectoId);
       }
 
       // --------- HISTORIAL INICIAL: NULL -> PROSPECCION ----------
+      // - Si es dependiente: usa el asesor_id local (baseInsert.asesor_id o el que ya quedó en la fila).
+      // - Si es RR: usa el que se haya podido determinar (patch.asesor_id) o null.
+      const asesorForHistory =
+        (!isRR ? (data.asesor_id ?? targetAsesorId) : (patch.asesor_id ?? null)) || null;
+
       await supabase.from('prospecto_stage_history').insert({
-        prospecto_id: data.id,
+        prospecto_id: insertedProspectoId,
         hl_opportunity_id: r?.opportunityId ?? null,
         from_stage: null,
         to_stage: 'PROSPECCION',
         changed_at: new Date().toISOString(),
-        asesor_id: patch.asesor_id ?? null,
+        asesor_id: asesorForHistory,
         source: 'SYSTEM',
       });
-      // -----------------------------------------------------------
 
-      // <<< Completar por si ya tenemos asesor_id y la fila quedó sin él
-      if (patch.asesor_id) {
-        const { data: latestSystem } = await supabase
-          .from('prospecto_stage_history')
-          .select('id, asesor_id')
-          .eq('prospecto_id', data.id)
-          .eq('to_stage', 'PROSPECCION')
-          .eq('source', 'SYSTEM')
-          .order('changed_at', { ascending: false })
-          .limit(1)
+      // Completar si quedó sin asesor en el historial pero ya tenemos asesor en la fila
+      if (!asesorForHistory) {
+        const { data: pRow } = await supabase
+          .from('prospectos')
+          .select('asesor_id')
+          .eq('id', insertedProspectoId)
           .maybeSingle();
 
-        if (latestSystem?.id && !latestSystem.asesor_id) {
-          await supabase
+        if (pRow?.asesor_id) {
+          const { data: latestSystem } = await supabase
             .from('prospecto_stage_history')
-            .update({ asesor_id: patch.asesor_id })
-            .eq('id', latestSystem.id);
+            .select('id, asesor_id')
+            .eq('prospecto_id', insertedProspectoId)
+            .eq('to_stage', 'PROSPECCION')
+            .eq('source', 'SYSTEM')
+            .order('changed_at', { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+          if (latestSystem?.id && !latestSystem.asesor_id) {
+            await supabase
+              .from('prospecto_stage_history')
+              .update({ asesor_id: pRow.asesor_id })
+              .eq('id', latestSystem.id);
+          }
         }
       }
-      // >>>
+      // -----------------------------------------------------------
 
     } catch (e) {
       console.warn('pushToHighLevel error:', e);
     }
 
-    return res.status(200).json({ ok: true, id: data.id });
+    return res.status(200).json({ ok: true, id: insertedProspectoId });
   } catch {
     return res.status(200).json({ ok: false, error: 'ERROR_DESCONOCIDO' });
   }
