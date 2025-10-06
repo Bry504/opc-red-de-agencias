@@ -34,8 +34,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const hl_opportunity_id = body.hl_opportunity_id || deep(rawBody, "opportunity.id") || body.id || null;
     const hl_pipeline = body.hl_pipeline || null;
     const hl_stage = body.hl_stage || null;
-    const razon_no_interesado = body.razon_no_interesado || null;
-    const razon_no_contactable = body.razon_no_contactable || null;
+    const razon_no_interesado =   body.razon_no_interesado
+            ?? deep(rawBody, 'opportunity.custom.razon_de_oportunidad_perdida')
+            ?? deep(rawBody, 'razon_de_oportunidad_perdida')
+            ?? null;
+    const razon_no_contactable = body.razon_no_contactable
+            ?? deep(rawBody, 'opportunity.custom.razon_de_no_contactabilidad')
+            ?? deep(rawBody, 'razon_de_no_contactabilidad')
+            ?? null;
 
     if (!["no_interesado","no_contactable"].includes(source)) {
       return res.status(200).json({ ok: true, skip: "INVALID_SOURCE", received: body });
