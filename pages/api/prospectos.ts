@@ -34,6 +34,11 @@ function isValidEmail(v?: string) {
   if (!v) return true;
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
 }
+function cel9(v?: string | null) {
+  const d = (v ?? '').replace(/\D/g, '');
+  const s = d.startsWith('51') ? d.slice(2) : d; // quita prefijo 51 si viene
+  return s.slice(-9) || ''; // últimos 9 dígitos
+}
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 // --- Envío a HighLevel (contacto + tags + owner opcional + oportunidad + nota) ---
@@ -237,14 +242,16 @@ async function pushToHighLevel({
       }
     }
   }
-
+  
   // ---------- 5) Nota opcional ----------
   if ((comentario && comentario.trim()) || lugarProspeccion || proyecto || dniCe) {
     try {
+      // === Celular (9 dígitos, sin +51) ===
+      const celular = cel9(String(phoneE164 ?? '').trim()); // si tu var se llama "phone" usa cel9(String(phone ?? ''))
       const note =
         `Comentario OPC:\n${(comentario || '').trim()}\n\n` +
         `Meta:\n- Código: ${opcCodigo || ''}\n- Proyecto: ${proyecto || ''}\n` +
-        `- Lugar prospección: ${lugarProspeccion || ''}\n- DNI/CE: ${dniCe || ''}`;
+        `- Lugar prospección: ${lugarProspeccion || ''}\n` +  `- Celular: ${celular}\n` + `- DNI/CE: ${dniCe || ''}`;
       const noteResp = await fetch(
         `https://services.leadconnectorhq.com/contacts/${contactId}/notes`,
         { method: 'POST', headers: baseHeaders, body: JSON.stringify({ body: note }) }
